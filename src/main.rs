@@ -23,12 +23,21 @@ async fn main() -> OpenActionResult<()> {
     run(std::env::args().collect()).await
 }
 
+/// How often to probe the daemon's liveness while the property-change
+/// stream is otherwise quiet. zbus's `PropertyStream` does not end when the
+/// peer holding the D-Bus name disappears - only a failed call surfaces
+/// that - so this is the only way to detect the daemon dying after a
+/// successful connect.
+const LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Runs forever: connects to power-profiles-daemon, seeds the initial
 /// profile, then holds its D-Bus change stream open and renders every
-/// change to every tracked instance. On any failure (connect, or the
-/// stream ending because the bus connection dropped), marks state
-/// "Unavailable" and retries after a short delay - the daemon may start
-/// after OpenDeck does, or the bus connection may recover.
+/// change to every tracked instance, while also periodically probing
+/// liveness in case the daemon disappears without the stream itself
+/// ending. On any failure (connect, stream end, or a failed liveness
+/// probe), marks state "Unavailable" and retries after a short delay - the
+/// daemon may start after OpenDeck does, or the bus connection may
+/// recover.
 async fn watch_and_reconnect(action: PowerProfileAction) {
     loop {
         match PowerProfilesClient::connect().await {
@@ -54,10 +63,30 @@ async fn watch_and_reconnect(action: PowerProfileAction) {
                 let mut stream = Box::pin(client.watch_active_profile().await);
                 action.set_client(Some(client)).await;
 
-                while let Some(name) = stream.next().await {
-                    action
-                        .set_state_and_render_all(state_for_profile(&name))
-                        .await;
+                let mut liveness_tick = tokio::time::interval(LIVENESS_PROBE_INTERVAL);
+                liveness_tick.tick().await; // the first tick fires immediately; consume it
+
+                loop {
+                    tokio::select! {
+                        item = stream.next() => {
+                            match item {
+                                Some(name) => {
+                                    action
+                                        .set_state_and_render_all(state_for_profile(&name))
+                                        .await;
+                                }
+                                None => break,
+                            }
+                        }
+                        _ = liveness_tick.tick() => {
+                            if !action.probe_liveness().await {
+                                log::warn!(
+                                    "power-profiles-daemon liveness probe failed; reconnecting"
+                                );
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 log::warn!("power-profiles-daemon watch stream ended; reconnecting");

@@ -75,6 +75,20 @@ impl PowerProfileAction {
         *self.shared.client.write().await = client;
     }
 
+    /// Returns true if a liveness probe (a plain `ActiveProfile` read)
+    /// against the currently stored client succeeds. Used by the watch/
+    /// reconnect loop in main.rs to detect the daemon disappearing without
+    /// the property-change stream itself ending - zbus's `PropertyStream`
+    /// only ends when its property cache is dropped, not when the peer
+    /// that owns the D-Bus interface goes away.
+    pub async fn probe_liveness(&self) -> bool {
+        let guard = self.shared.client.read().await;
+        match guard.as_ref() {
+            Some(client) => client.active_profile().await.is_ok(),
+            None => false,
+        }
+    }
+
     /// Shared by `dial_rotate` and `dial_up`: reads the current client and
     /// last-known state, computes the target profile via `target_fn`, and
     /// requests it. Never renders itself - the watch stream in `main.rs`
