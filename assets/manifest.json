@@ -1,0 +1,26 @@
+{
+	"Name": "Power Profile",
+	"Author": "jfms7s",
+	"Version": "0.1.0",
+	"Category": "Utilities",
+	"Icon": "icons/icon",
+	"OS": [{ "Platform": "linux" }],
+	"CodePaths": {
+		"x86_64-unknown-linux-gnu": "opendeck-power-profile-x86_64-unknown-linux-gnu",
+		"aarch64-unknown-linux-gnu": "opendeck-power-profile-aarch64-unknown-linux-gnu"
+	},
+	"CodePathLin": "opendeck-power-profile-x86_64-unknown-linux-gnu",
+	"Actions": [
+		{
+			"UUID": "com.jfms7s.powerprofile.dial",
+			"Name": "Power Profile",
+			"Icon": "icons/icon",
+			"Tooltip": "Step through power-profiles-daemon profiles with the dial; press to reset to Balanced",
+			"Controllers": ["Encoder"],
+			"States": [{ "Image": "icons/actionDefaultImage" }],
+			"Encoder": {
+				"layout": "layouts/power-profile.json"
+			}
+		}
+	]
+}
