@@ -37,9 +37,11 @@ fn bar_value_for_index(idx: usize) -> f64 {
 /// (see assets/layouts/power-profile.json).
 pub fn feedback_for_state(state: ProfileState) -> Value {
     let (name, color, bar_value) = match state {
-        ProfileState::Known(idx) => {
-            (display_name(idx), color_for_index(idx), bar_value_for_index(idx))
-        }
+        ProfileState::Known(idx) => (
+            display_name(idx),
+            color_for_index(idx),
+            bar_value_for_index(idx),
+        ),
         ProfileState::Unknown => ("Unknown", DISABLED_COLOR, 0.0),
         ProfileState::Unavailable => ("Unavailable", DISABLED_COLOR, 0.0),
     };

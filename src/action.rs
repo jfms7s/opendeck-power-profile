@@ -54,8 +54,12 @@ impl PowerProfileAction {
         // before awaiting `get_instance`/`set_feedback` per entry - holding
         // an iterator guard across an await point would keep that shard
         // locked for the whole loop.
-        let instance_ids: Vec<String> =
-            self.shared.registry.iter().map(|e| e.key().clone()).collect();
+        let instance_ids: Vec<String> = self
+            .shared
+            .registry
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
 
         for instance_id in instance_ids {
             let Some(instance) = openaction::get_instance(instance_id).await else {
@@ -116,7 +120,8 @@ impl Action for PowerProfileAction {
         ticks: i16,
         _pressed: bool,
     ) -> OpenActionResult<()> {
-        self.apply(instance, |state| step_target(state, ticks)).await
+        self.apply(instance, |state| step_target(state, ticks))
+            .await
     }
 
     async fn dial_up(&self, instance: &Instance, _settings: &()) -> OpenActionResult<()> {
