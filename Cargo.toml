@@ -7,3 +7,7 @@ description = "OpenDeck plugin: step through power-profiles-daemon profiles with
 repository = "https://github.com/jfms7s/opendeck-power-profile"
 
 [dependencies]
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time"] }
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
+thiserror = "2"
