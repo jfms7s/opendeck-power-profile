@@ -11,6 +11,9 @@ active one on the dial's touch strip.
 - **Rotate** to step one profile at a time (Power Saver -> Balanced -> Performance),
   clamped at both ends - it won't wrap around.
 - **Press** to jump straight to Balanced, regardless of the current profile.
+- The touch strip follows Elgato's dial style: the profile name on top, a gauge in the
+  middle whose needle points at the active profile, and leaf / bolt hints either side
+  showing which way to turn. A hint dims when the dial can't go any further that way.
 - The touch strip updates live even when the profile changes from somewhere else (a GUI
   applet, another key, `powerprofilesctl` in a terminal) - it subscribes to
   power-profiles-daemon's D-Bus change notifications rather than polling.
@@ -30,8 +33,10 @@ startup).
 Run this against a live OpenDeck + Stream Deck session with power-profiles-daemon running,
 before cutting a release:
 
-- [ ] Adding a Power Profile dial shows the current profile's name and a matching bar
-      position shortly after appearing.
+- [ ] Adding a Power Profile dial shows the current profile's name and a gauge whose
+      needle points at it shortly after appearing.
+- [ ] The leaf (left) icon dims at Power Saver and the bolt (right) icon dims at
+      Performance; both dim while the dial shows "Unavailable".
 - [ ] Rotating clockwise from Power Saver moves to Balanced, then Performance; rotating
       further clockwise stays at Performance (no wraparound).
 - [ ] Rotating counter-clockwise from Performance moves to Balanced, then Power Saver;

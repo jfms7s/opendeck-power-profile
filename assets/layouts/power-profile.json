@@ -5,22 +5,26 @@
 		{
 			"key": "name",
 			"type": "text",
-			"rect": [0, 20, 200, 34],
+			"rect": [0, 6, 200, 22],
 			"alignment": "center",
 			"color": "white",
 			"value": "--",
-			"font": { "size": 22, "weight": 700 }
+			"font": { "size": 16, "weight": 600 }
 		},
 		{
-			"key": "bar",
-			"type": "bar",
-			"rect": [10, 60, 180, 22],
-			"value": 0,
-			"bar_bg_c": "#374151",
-			"bar_fill_c": "#22c55e",
-			"bar_border_c": "#111827",
-			"border_w": 1,
-			"subtype": 0
+			"key": "left",
+			"type": "pixmap",
+			"rect": [22, 46, 32, 32]
+		},
+		{
+			"key": "gauge",
+			"type": "pixmap",
+			"rect": [74, 30, 52, 52]
+		},
+		{
+			"key": "right",
+			"type": "pixmap",
+			"rect": [146, 46, 32, 32]
 		}
 	]
 }
