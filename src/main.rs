@@ -1,6 +1,7 @@
 mod action;
 mod decision;
 mod format;
+mod icons;
 mod power_profiles;
 
 use action::PowerProfileAction;
