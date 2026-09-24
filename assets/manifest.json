@@ -1,7 +1,7 @@
 {
 	"Name": "Power Profile",
 	"Author": "jfms7s",
-	"Version": "0.1.0",
+	"Version": "0.2.0",
 	"Category": "Utilities",
 	"Icon": "icons/icon",
 	"OS": [{ "Platform": "linux" }],
