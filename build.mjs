@@ -46,8 +46,13 @@ rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
 cpSync("assets/manifest.json", join(outDir, "manifest.json"));
-cpSync("assets/icons", join(outDir, "icons"), { recursive: true });
-cpSync("assets/layouts", join(outDir, "layouts"), { recursive: true });
+// Not every plugin has layouts or a property inspector - copy what exists.
+// Icon sources (assets/icon-src/) are deliberately not shipped.
+for (const dir of ["icons", "layouts", "propertyInspector"]) {
+	if (existsSync(join("assets", dir))) {
+		cpSync(join("assets", dir), join(outDir, dir), { recursive: true });
+	}
+}
 copyFileSync(binPath, join(outDir, `${BIN_NAME}-${target}`));
 
 console.log(`built ${outDir} for ${target}`);
