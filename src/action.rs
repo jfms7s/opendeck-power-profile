@@ -1,111 +1,47 @@
-use crate::decision::{ProfileState, RESET_PROFILE, step_target};
+use crate::decision::{ProfileState, Request};
 use crate::format::feedback_for_state;
-use crate::power_profiles::PowerProfilesClient;
+use crate::hub::{ProfileHub, Renderer};
 use async_trait::async_trait;
-use dashmap::DashSet;
 use openaction::{Action, Instance, OpenActionResult};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
 
-struct SharedState {
-    client: RwLock<Option<PowerProfilesClient>>,
-    last_known: RwLock<ProfileState>,
-    registry: DashSet<String>,
-}
+/// The dial has nothing to configure per instance. Still a struct rather
+/// than `()`: OpenDeck sends `"settings": {}` with every event, and a map
+/// can't deserialize into `()` (openaction would log an ERROR each time).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PowerProfileSettings {}
 
-#[derive(Clone)]
-pub struct PowerProfileAction {
-    shared: Arc<SharedState>,
-}
+/// Renders hub state changes onto OpenDeck instances' touch strips.
+pub struct OpenDeckRenderer;
 
-impl PowerProfileAction {
-    pub fn new() -> Self {
-        Self {
-            shared: Arc::new(SharedState {
-                client: RwLock::new(None),
-                last_known: RwLock::new(ProfileState::Unavailable),
-                registry: DashSet::new(),
-            }),
-        }
-    }
-
-    fn track(&self, instance_id: &str) {
-        self.shared.registry.insert(instance_id.to_string());
-    }
-
-    fn untrack(&self, instance_id: &str) {
-        self.shared.registry.remove(instance_id);
-    }
-
-    async fn render_cached(&self, instance: &Instance) -> OpenActionResult<()> {
-        let state = *self.shared.last_known.read().await;
-        instance.set_feedback(&feedback_for_state(state)).await
-    }
-
-    /// Sets `last_known` and pushes fresh feedback to every tracked
-    /// instance - the single path the background watch/reconnect task
-    /// (Task 6) uses, so a self- or externally-triggered profile change can
-    /// never render differently or race.
-    pub async fn set_state_and_render_all(&self, state: ProfileState) {
-        *self.shared.last_known.write().await = state;
+#[async_trait]
+impl Renderer for OpenDeckRenderer {
+    async fn render_all(&self, instance_ids: &[String], state: ProfileState) {
         let feedback = feedback_for_state(state);
-
-        // Collect ids into a Vec first, releasing the DashSet shard lock
-        // before awaiting `get_instance`/`set_feedback` per entry - holding
-        // an iterator guard across an await point would keep that shard
-        // locked for the whole loop.
-        let instance_ids: Vec<String> = self
-            .shared
-            .registry
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
-
         for instance_id in instance_ids {
-            let Some(instance) = openaction::get_instance(instance_id).await else {
-                continue; // instance disappeared between the snapshot and now
+            let Some(instance) = openaction::get_instance(instance_id.clone()).await else {
+                continue; // disappeared since the hub snapshotted its registry
             };
             if let Err(e) = instance.set_feedback(&feedback).await {
-                log::warn!("render failed: {e}");
+                log::warn!("render to {instance_id} failed: {e}");
             }
         }
     }
+}
 
-    pub async fn set_client(&self, client: Option<PowerProfilesClient>) {
-        *self.shared.client.write().await = client;
+/// The "Power Profile" dial: translates OpenDeck events into hub calls.
+pub struct PowerProfileAction {
+    hub: ProfileHub,
+}
+
+impl PowerProfileAction {
+    pub fn new(hub: ProfileHub) -> Self {
+        Self { hub }
     }
 
-    /// Returns true if a liveness probe (a plain `ActiveProfile` read)
-    /// against the currently stored client succeeds. Used by the watch/
-    /// reconnect loop in main.rs to detect the daemon disappearing without
-    /// the property-change stream itself ending - zbus's `PropertyStream`
-    /// only ends when its property cache is dropped, not when the peer
-    /// that owns the D-Bus interface goes away.
-    pub async fn probe_liveness(&self) -> bool {
-        let guard = self.shared.client.read().await;
-        match guard.as_ref() {
-            Some(client) => client.active_profile().await.is_ok(),
-            None => false,
-        }
-    }
-
-    /// Shared by `dial_rotate` and `dial_up`: reads the current client and
-    /// last-known state, computes the target profile via `target_fn`, and
-    /// requests it. Never renders itself - the watch stream in `main.rs`
-    /// (Task 6) does that once the change is confirmed over D-Bus.
-    async fn apply(
-        &self,
-        instance: &Instance,
-        target_fn: impl FnOnce(ProfileState) -> &'static str,
-    ) -> OpenActionResult<()> {
-        let client_guard = self.shared.client.read().await;
-        let Some(client) = client_guard.as_ref() else {
-            return instance.show_alert().await;
-        };
-        let state = *self.shared.last_known.read().await;
-        let target = target_fn(state);
-        if let Err(e) = client.set_active_profile(target).await {
-            log::warn!("set_active_profile({target}) failed: {e}");
+    async fn request(&self, instance: &Instance, request: Request) -> OpenActionResult<()> {
+        if let Err(e) = self.hub.request(request).await {
+            log::warn!("{request:?} failed: {e}");
             return instance.show_alert().await;
         }
         Ok(())
@@ -115,31 +51,42 @@ impl PowerProfileAction {
 #[async_trait]
 impl Action for PowerProfileAction {
     const UUID: &'static str = "com.jfms7s.powerprofile.dial";
-    type Settings = ();
+    type Settings = PowerProfileSettings;
 
-    async fn will_appear(&self, instance: &Instance, _settings: &()) -> OpenActionResult<()> {
-        self.track(&instance.instance_id);
-        self.render_cached(instance).await
+    async fn will_appear(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
+        let state = self.hub.track(&instance.instance_id);
+        instance.set_feedback(&feedback_for_state(state)).await
     }
 
-    async fn will_disappear(&self, instance: &Instance, _settings: &()) -> OpenActionResult<()> {
-        self.untrack(&instance.instance_id);
+    async fn will_disappear(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
+        self.hub.untrack(&instance.instance_id);
         Ok(())
     }
 
     async fn dial_rotate(
         &self,
         instance: &Instance,
-        _settings: &(),
+        _settings: &Self::Settings,
         ticks: i16,
         _pressed: bool,
     ) -> OpenActionResult<()> {
-        self.apply(instance, |state| step_target(state, ticks))
-            .await
+        self.request(instance, Request::Step(ticks)).await
     }
 
-    async fn dial_up(&self, instance: &Instance, _settings: &()) -> OpenActionResult<()> {
-        self.apply(instance, |_state| RESET_PROFILE).await
+    async fn dial_up(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
+        self.request(instance, Request::Reset).await
     }
 }
 
@@ -147,29 +94,46 @@ impl Action for PowerProfileAction {
 mod tests {
     use super::*;
 
+    fn manifest() -> serde_json::Value {
+        serde_json::from_str(include_str!("../assets/manifest.json")).unwrap()
+    }
+
     #[test]
     fn action_uuid_matches_the_shipped_manifest() {
-        let manifest: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/manifest.json")).unwrap();
-        let manifest_uuid = manifest["Actions"][0]["UUID"].as_str().unwrap();
+        let manifest_uuid = manifest()["Actions"][0]["UUID"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert_eq!(manifest_uuid, <PowerProfileAction as Action>::UUID);
     }
 
     #[test]
-    fn track_then_untrack_round_trips_through_the_registry() {
-        let action = PowerProfileAction::new();
-        action.track("ctx1");
-        assert!(action.shared.registry.contains("ctx1"));
-
-        action.untrack("ctx1");
-        assert!(!action.shared.registry.contains("ctx1"));
+    fn layout_id_belongs_to_this_plugin() {
+        let layout: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/layouts/power-profile.json")).unwrap();
+        let (plugin_uuid, _action) = <PowerProfileAction as Action>::UUID
+            .rsplit_once('.')
+            .unwrap();
+        let layout_id = layout["id"].as_str().unwrap();
+        assert!(
+            layout_id.starts_with(&format!("{plugin_uuid}.")),
+            "{layout_id}"
+        );
     }
 
+    /// build.mjs checks this too, but only when packaging; this fails CI first.
     #[test]
-    fn tracking_the_same_instance_twice_is_idempotent() {
-        let action = PowerProfileAction::new();
-        action.track("ctx1");
-        action.track("ctx1");
-        assert_eq!(action.shared.registry.len(), 1);
+    fn crate_version_matches_the_shipped_manifest() {
+        assert_eq!(manifest()["Version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    /// OpenDeck sends `"settings": {}` with every event; openaction logs an
+    /// ERROR for every event whose settings fail to deserialize.
+    #[test]
+    fn settings_accept_what_opendeck_sends() {
+        for sent in [serde_json::json!({}), serde_json::json!({"unexpected": 1})] {
+            serde_json::from_value::<<PowerProfileAction as Action>::Settings>(sent.clone())
+                .unwrap_or_else(|e| panic!("settings {sent} rejected: {e}"));
+        }
     }
 }

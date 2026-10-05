@@ -15,7 +15,7 @@
 			"UUID": "com.jfms7s.powerprofile.dial",
 			"Name": "Power Profile",
 			"Icon": "icons/icon",
-			"Tooltip": "Step through power-profiles-daemon profiles with the dial; press to reset to Balanced",
+			"Tooltip": "Step through the system power profiles with the dial; press to reset to Balanced",
 			"Controllers": ["Encoder"],
 			"States": [{ "Image": "icons/actionDefaultImage" }],
 			"Encoder": {
