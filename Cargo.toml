@@ -1,6 +1,6 @@
 [package]
 name = "opendeck-power-profile"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 # Minimum supported Rust: the highest `rust-version` in the dependency tree
 # (uuid, via zbus). CI checks it in the `msrv` job.
