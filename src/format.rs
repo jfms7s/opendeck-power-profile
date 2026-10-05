@@ -1,29 +1,37 @@
 use serde_json::{Value, json};
 
-use crate::decision::{PROFILE_ORDER, ProfileState};
-use crate::icons;
+use crate::decision::{Profile, ProfileState, can_step};
+use crate::icons::{self, Needle};
 
-pub const DISABLED_COLOR: &str = "#6b7280";
+const DISABLED_COLOR: &str = "#6b7280";
 
-const SAVER_COLOR: &str = "#22c55e";
-const BALANCED_COLOR: &str = "#eab308";
-const PERFORMANCE_COLOR: &str = "#ef4444";
-
-/// Human-readable name for a known profile index (e.g. "power-saver" -> "Power Saver").
-fn display_name(idx: usize) -> &'static str {
-    match PROFILE_ORDER[idx] {
-        "power-saver" => "Power Saver",
-        "balanced" => "Balanced",
-        "performance" => "Performance",
-        other => unreachable!("PROFILE_ORDER has no display name for {other}"),
-    }
+/// How one profile looks on the touch strip.
+struct ProfileStyle {
+    name: &'static str,
+    color: &'static str,
+    /// Needle angle in degrees from straight up (negative = left).
+    needle_angle: f64,
 }
 
-fn color_for_index(idx: usize) -> &'static str {
-    match idx {
-        0 => SAVER_COLOR,
-        1 => BALANCED_COLOR,
-        _ => PERFORMANCE_COLOR,
+/// The single presentation table for the profiles: name, the low-to-high
+/// green/yellow/red colour convention, and where the gauge needle points.
+fn style(profile: Profile) -> ProfileStyle {
+    match profile {
+        Profile::PowerSaver => ProfileStyle {
+            name: "Power Saver",
+            color: "#22c55e",
+            needle_angle: -60.0,
+        },
+        Profile::Balanced => ProfileStyle {
+            name: "Balanced",
+            color: "#eab308",
+            needle_angle: 0.0,
+        },
+        Profile::Performance => ProfileStyle {
+            name: "Performance",
+            color: "#ef4444",
+            needle_angle: 60.0,
+        },
     }
 }
 
@@ -31,66 +39,70 @@ fn color_for_index(idx: usize) -> &'static str {
 /// object keyed by each layout item's `key`
 /// (see assets/layouts/power-profile.json).
 ///
-/// The side icons hint at what rotating does, and dim when the dial is
-/// clamped at that end (or when there's no daemon to talk to at all).
+/// The side icons hint at what rotating does - the leaf towards Power Saver,
+/// the bolt towards Performance - and dim when rotating that way would do
+/// nothing (`decision::can_step`).
 pub fn feedback_for_state(state: ProfileState) -> Value {
-    let last = PROFILE_ORDER.len() - 1;
-    let (name, gauge, can_go_left, can_go_right) = match state {
-        ProfileState::Known(idx) => (
-            display_name(idx),
-            icons::gauge(Some((idx, color_for_index(idx))), "#ffffff"),
-            idx > 0,
-            idx < last,
-        ),
-        // Rotating from Unknown still works (it resets to Balanced).
-        ProfileState::Unknown => ("Unknown", icons::gauge(None, DISABLED_COLOR), true, true),
-        ProfileState::Unavailable => (
-            "Unavailable",
-            icons::gauge(None, DISABLED_COLOR),
-            false,
-            false,
-        ),
+    let (name, gauge) = match state {
+        ProfileState::Known(profile) => {
+            let style = style(profile);
+            let needle = Needle {
+                angle_degrees: style.needle_angle,
+                color: style.color,
+            };
+            (style.name, icons::gauge(Some(needle), icons::WHITE))
+        }
+        ProfileState::Unknown => ("Unknown", icons::gauge(None, DISABLED_COLOR)),
+        ProfileState::Unavailable => ("Unavailable", icons::gauge(None, DISABLED_COLOR)),
     };
     json!({
         "name": name,
-        "left": icons::leaf(can_go_left),
+        "left": icons::leaf(can_step(state, -1)),
         "gauge": gauge,
-        "right": icons::bolt(can_go_right),
+        "right": icons::bolt(can_step(state, 1)),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    const ALL_STATES: [ProfileState; 5] = [
+        ProfileState::Known(Profile::PowerSaver),
+        ProfileState::Known(Profile::Balanced),
+        ProfileState::Known(Profile::Performance),
+        ProfileState::Unknown,
+        ProfileState::Unavailable,
+    ];
 
     fn is_dimmed(svg: &Value) -> bool {
-        svg.as_str().unwrap().contains(r#"stroke-opacity="0.3""#)
+        let dimmed = format!(r#"stroke-opacity="{}""#, icons::DIMMED_OPACITY);
+        svg.as_str().unwrap().contains(&dimmed)
     }
 
     #[test]
     fn known_profiles_render_their_display_name_and_colored_needle() {
-        let f = feedback_for_state(ProfileState::Known(0));
-        assert_eq!(f["name"], "Power Saver");
-        assert!(f["gauge"].as_str().unwrap().contains("#22c55e"));
-
-        let f = feedback_for_state(ProfileState::Known(1));
-        assert_eq!(f["name"], "Balanced");
-        assert!(f["gauge"].as_str().unwrap().contains("#eab308"));
-
-        let f = feedback_for_state(ProfileState::Known(2));
-        assert_eq!(f["name"], "Performance");
-        assert!(f["gauge"].as_str().unwrap().contains("#ef4444"));
+        for (profile, name, color) in [
+            (Profile::PowerSaver, "Power Saver", "#22c55e"),
+            (Profile::Balanced, "Balanced", "#eab308"),
+            (Profile::Performance, "Performance", "#ef4444"),
+        ] {
+            let f = feedback_for_state(ProfileState::Known(profile));
+            assert_eq!(f["name"], name);
+            assert!(f["gauge"].as_str().unwrap().contains(color), "{profile:?}");
+        }
     }
 
     #[test]
     fn side_icons_dim_at_the_clamped_ends() {
-        let saver = feedback_for_state(ProfileState::Known(0));
+        let saver = feedback_for_state(ProfileState::Known(Profile::PowerSaver));
         assert!(is_dimmed(&saver["left"]) && !is_dimmed(&saver["right"]));
 
-        let balanced = feedback_for_state(ProfileState::Known(1));
+        let balanced = feedback_for_state(ProfileState::Known(Profile::Balanced));
         assert!(!is_dimmed(&balanced["left"]) && !is_dimmed(&balanced["right"]));
 
-        let performance = feedback_for_state(ProfileState::Known(2));
+        let performance = feedback_for_state(ProfileState::Known(Profile::Performance));
         assert!(!is_dimmed(&performance["left"]) && is_dimmed(&performance["right"]));
     }
 
@@ -111,18 +123,42 @@ mod tests {
     }
 
     #[test]
-    fn feedback_keys_match_the_shipped_layout() {
+    fn feedback_keys_match_the_shipped_layout_in_every_state() {
         let layout: Value =
             serde_json::from_str(include_str!("../assets/layouts/power-profile.json")).unwrap();
-        let keys: Vec<&str> = layout["items"]
+        let layout_keys: BTreeSet<&str> = layout["items"]
             .as_array()
             .unwrap()
             .iter()
             .map(|i| i["key"].as_str().unwrap())
             .collect();
-        let feedback = feedback_for_state(ProfileState::Unavailable);
-        for k in feedback.as_object().unwrap().keys() {
-            assert!(keys.contains(&k.as_str()), "layout has no item keyed {k}");
+        for state in ALL_STATES {
+            let feedback = feedback_for_state(state);
+            let feedback_keys: BTreeSet<&str> = feedback
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(feedback_keys, layout_keys, "feedback for {state:?}");
+        }
+    }
+
+    /// OpenDeck's strip renderer parses each pixmap with
+    /// `roxmltree::Document::parse(svg).unwrap()`, so malformed SVG would
+    /// panic the host, not the plugin.
+    #[test]
+    fn every_pixmap_in_every_state_is_well_formed_svg() {
+        for state in ALL_STATES {
+            let feedback = feedback_for_state(state);
+            for key in ["left", "gauge", "right"] {
+                let svg = feedback[key].as_str().unwrap();
+                let doc = roxmltree::Document::parse(svg)
+                    .unwrap_or_else(|e| panic!("{key} for {state:?} is not XML: {e}\n{svg}"));
+                let root = doc.root_element();
+                assert_eq!(root.tag_name().name(), "svg", "{key} for {state:?}");
+                assert!(root.attribute("viewBox").is_some(), "{key} for {state:?}");
+            }
         }
     }
 }

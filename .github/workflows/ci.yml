@@ -4,14 +4,82 @@ on:
     branches: [master]
   pull_request:
 
+# Every job states what it needs; nothing gets a write token.
+permissions: {}
+
+env:
+  # Bump deliberately (fmt/clippy results can change between releases).
+  RUST_TOOLCHAIN: "1.98.1"
+  # Keep in step with `rust-version` in Cargo.toml.
+  RUST_MSRV: "1.89.0"
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
+      - name: Install dbus-daemon (the D-Bus tests run a private bus)
+        run: command -v dbus-daemon || { sudo apt-get update && sudo apt-get install -y dbus-daemon; }
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  # Builds and packages exactly as release.yml does, so a packaging break shows
+  # up on the pull request rather than when a tag is pushed.
+  package:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+      - name: Install cross-compilation linker (aarch64)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - run: node build.mjs --release x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+  msrv:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
+      - run: cargo check --all-targets --locked
+
+  advisories:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          command-arguments: advisories
