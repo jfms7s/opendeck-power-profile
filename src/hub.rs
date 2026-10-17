@@ -7,10 +7,10 @@
 //! the change came from this plugin or from outside, so the two can never
 //! disagree. Dial requests never render; they only ask the provider.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -35,6 +35,11 @@ pub type Connector = Arc<dyn Fn() -> BoxFuture<'static, zbus::Result<Connection>
 pub struct HubConfig {
     /// How long to wait before reconnecting after a failed connect or a lost provider.
     pub retry_interval: Duration,
+    /// How long an unconfirmed request keeps counting as the base the next
+    /// rotation steps from. A provider that accepts a Set but never announces
+    /// it would otherwise leave the dial stepping from a profile that isn't
+    /// active. Keep it well above the provider's confirmation round trip.
+    pub pending_ttl: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -45,15 +50,74 @@ pub enum RequestError {
     Dbus(#[from] PowerProfilesError),
 }
 
-/// What the dial shows, plus the profile it last asked for.
+/// What the dial shows, plus the profiles it asked for that the provider has
+/// not confirmed yet. Pure bookkeeping: every method takes the time it acts
+/// at, so the rules are unit-tested without a bus or a clock.
 struct View {
     /// The last state the provider confirmed - what is rendered.
     confirmed: ProfileState,
-    /// A profile requested but not yet confirmed. Rotations step from this,
-    /// so two detents inside one D-Bus round trip move two profiles rather
-    /// than both stepping from the same confirmed one. Cleared by every
-    /// confirmation and by a failed request.
-    pending: Option<Profile>,
+    /// Requested but unconfirmed profiles, oldest first, each with when it
+    /// was requested. Rotations step from the newest one still younger than
+    /// the TTL, so detents inside one D-Bus round trip each move a profile,
+    /// and a reversal steps from the last request rather than from whatever
+    /// the provider has confirmed so far. A confirmation of an in-flight
+    /// profile drops it and everything requested before it; any other
+    /// confirmation (an external change, Unknown, Unavailable) drops them
+    /// all; a failed request drops only itself.
+    in_flight: VecDeque<(Profile, Instant)>,
+    ttl: Duration,
+}
+
+impl View {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            confirmed: ProfileState::Unavailable,
+            in_flight: VecDeque::new(),
+            ttl,
+        }
+    }
+
+    /// The state the next rotation steps from: the newest request younger
+    /// than the TTL, else the confirmed state.
+    fn base(&self, now: Instant) -> ProfileState {
+        self.in_flight
+            .back()
+            .filter(|(_, at)| now.saturating_duration_since(*at) < self.ttl)
+            .map_or(self.confirmed, |(profile, _)| ProfileState::Known(*profile))
+    }
+
+    /// Records that `target` was just requested, forgetting requests past
+    /// the TTL so a provider that never confirms can't grow the list.
+    fn requested(&mut self, target: Profile, now: Instant) {
+        self.in_flight
+            .retain(|(_, at)| now.saturating_duration_since(*at) < self.ttl);
+        self.in_flight.push_back((target, now));
+    }
+
+    /// Forgets the newest request if it is `target`, whose Set failed.
+    /// Requests never overlap (openaction runs handlers one at a time), so
+    /// the failing one is the newest unless a confirmation already dropped it.
+    fn failed(&mut self, target: Profile) {
+        if self.in_flight.back().is_some_and(|(p, _)| *p == target) {
+            self.in_flight.pop_back();
+        }
+    }
+
+    /// Records a state the provider confirmed; returns whether it differs
+    /// from what was confirmed before (whether to render).
+    fn confirm(&mut self, state: ProfileState) -> bool {
+        let acknowledged = match state {
+            ProfileState::Known(profile) => self.in_flight.iter().position(|(p, _)| *p == profile),
+            ProfileState::Unknown | ProfileState::Unavailable => None,
+        };
+        match acknowledged {
+            Some(index) => drop(self.in_flight.drain(..=index)),
+            None => self.in_flight.clear(),
+        }
+        let changed = self.confirmed != state;
+        self.confirmed = state;
+        changed
+    }
 }
 
 struct Inner {
@@ -102,10 +166,7 @@ impl ProfileHub {
                 renderer,
                 config,
                 client: Mutex::new(None),
-                view: Mutex::new(View {
-                    confirmed: ProfileState::Unavailable,
-                    pending: None,
-                }),
+                view: Mutex::new(View::new(config.pending_ttl)),
                 registry: Mutex::new(HashSet::new()),
             }),
         }
@@ -124,13 +185,8 @@ impl ProfileHub {
     /// Records a state the provider confirmed and renders it to every tracked
     /// instance - unless it is what they already show.
     async fn confirm(&self, state: ProfileState) {
-        {
-            let mut view = lock(&self.inner.view);
-            view.pending = None;
-            if view.confirmed == state {
-                return;
-            }
-            view.confirmed = state;
+        if !lock(&self.inner.view).confirm(state) {
+            return;
         }
         let instance_ids: Vec<String> = lock(&self.inner.registry).iter().cloned().collect();
         self.inner.renderer.render_all(&instance_ids, state).await;
@@ -149,18 +205,15 @@ impl ProfileHub {
             .ok_or(RequestError::NotConnected)?;
         let target = {
             let mut view = lock(&self.inner.view);
-            let base = view.pending.map_or(view.confirmed, ProfileState::Known);
-            let Some(target) = target_for(base, request) else {
+            let now = Instant::now();
+            let Some(target) = target_for(view.base(now), request) else {
                 return Ok(()); // clamped, or a zero-tick rotation
             };
-            view.pending = Some(target);
+            view.requested(target, now);
             target
         };
         if let Err(e) = client.set_active_profile(target).await {
-            let mut view = lock(&self.inner.view);
-            if view.pending == Some(target) {
-                view.pending = None;
-            }
+            lock(&self.inner.view).failed(target);
             return Err(e.into());
         }
         Ok(())
@@ -245,5 +298,103 @@ impl ProfileHub {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Profile::*;
+
+    const TTL: Duration = Duration::from_secs(3);
+
+    fn known_view(profile: Profile) -> View {
+        let mut view = View::new(TTL);
+        view.confirm(ProfileState::Known(profile));
+        view
+    }
+
+    /// Steps the way `ProfileHub::request` does, returning the target.
+    fn step(view: &mut View, ticks: i16, now: Instant) -> Profile {
+        let target = target_for(view.base(now), Request::Step(ticks)).unwrap();
+        view.requested(target, now);
+        target
+    }
+
+    #[test]
+    fn a_reversal_after_a_partial_confirmation_steps_from_the_last_request() {
+        let now = Instant::now();
+        let mut view = known_view(PowerSaver);
+        assert_eq!(step(&mut view, 1, now), Balanced);
+        assert_eq!(step(&mut view, 1, now), Performance);
+        view.confirm(ProfileState::Known(Balanced));
+        assert_eq!(view.base(now), ProfileState::Known(Performance));
+        assert_eq!(step(&mut view, -1, now), Balanced);
+    }
+
+    #[test]
+    fn in_order_confirmations_empty_the_list() {
+        let now = Instant::now();
+        let mut view = known_view(PowerSaver);
+        step(&mut view, 1, now);
+        step(&mut view, 1, now);
+        step(&mut view, -1, now);
+        for profile in [Balanced, Performance, Balanced] {
+            view.confirm(ProfileState::Known(profile));
+        }
+        assert!(view.in_flight.is_empty());
+        assert_eq!(view.base(now), ProfileState::Known(Balanced));
+    }
+
+    #[test]
+    fn a_confirmation_not_in_the_list_clears_it() {
+        for external in [
+            ProfileState::Known(PowerSaver),
+            ProfileState::Unknown,
+            ProfileState::Unavailable,
+        ] {
+            let now = Instant::now();
+            let mut view = known_view(Balanced);
+            step(&mut view, 1, now);
+            view.confirm(external);
+            assert!(view.in_flight.is_empty(), "{external:?}");
+            assert_eq!(view.base(now), external);
+        }
+    }
+
+    #[test]
+    fn a_failed_newest_request_pops_only_itself() {
+        let now = Instant::now();
+        let mut view = known_view(PowerSaver);
+        step(&mut view, 1, now);
+        let newest = step(&mut view, 1, now);
+        view.failed(newest);
+        assert_eq!(view.in_flight.len(), 1);
+        assert_eq!(view.base(now), ProfileState::Known(Balanced));
+        // A target that is not the newest (already confirmed away) is left alone.
+        view.failed(Performance);
+        assert_eq!(view.in_flight.len(), 1);
+    }
+
+    #[test]
+    fn a_request_older_than_the_ttl_is_not_the_base() {
+        let then = Instant::now();
+        let mut view = known_view(PowerSaver);
+        step(&mut view, 1, then);
+        assert_eq!(
+            view.base(then + TTL - Duration::from_millis(1)),
+            ProfileState::Known(Balanced)
+        );
+        assert_eq!(view.base(then + TTL), ProfileState::Known(PowerSaver));
+        // The next request steps from the confirmed state and drops the stale one.
+        assert_eq!(step(&mut view, 1, then + TTL), Balanced);
+        assert_eq!(view.in_flight.len(), 1);
+    }
+
+    #[test]
+    fn confirm_reports_whether_the_state_changed() {
+        let mut view = known_view(Balanced);
+        assert!(!view.confirm(ProfileState::Known(Balanced)));
+        assert!(view.confirm(ProfileState::Known(Performance)));
     }
 }
