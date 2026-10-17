@@ -83,3 +83,15 @@ jobs:
         with:
           command: check
           command-arguments: advisories
+
+  # eng-metrics-lab (report-only): duplication, complexity and dead code; the collector picks up the artifact.
+  quality:
+    runs-on: ubuntu-latest
+    permissions: {contents: read, packages: read}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Code quality (report-only)
+        uses: jfms7s/eng-metrics-lab/action@v0
+        continue-on-error: true
