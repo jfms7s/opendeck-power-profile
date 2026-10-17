@@ -20,6 +20,12 @@ use openaction::{OpenActionResult, register_action, run};
 /// connect attempt fails.
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Bounds every D-Bus method call, so a provider that is alive but stuck
+/// (in polkit, say) cannot hold a dial event - and every event queued behind
+/// it - forever. Long enough for D-Bus to activate a stopped provider on
+/// connect, which goes through the same connection.
+const METHOD_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> OpenActionResult<()> {
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default())
@@ -31,7 +37,14 @@ async fn main() -> OpenActionResult<()> {
             retry_interval: RETRY_INTERVAL,
         },
     );
-    let connector: Connector = Arc::new(|| Box::pin(zbus::Connection::system()));
+    let connector: Connector = Arc::new(|| {
+        Box::pin(async {
+            zbus::connection::Builder::system()?
+                .method_timeout(METHOD_TIMEOUT)
+                .build()
+                .await
+        })
+    });
     tokio::spawn(supervise(hub.clone(), connector));
 
     register_action(PowerProfileAction::new(hub)).await;
