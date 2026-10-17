@@ -12,6 +12,8 @@ use crate::hub::{Connector, HubConfig, ProfileHub, RequestError};
 use crate::test_support::{FakeProvider, Flavor, PrivateBus, Rendered, recording_renderer};
 
 const RETRY: Duration = Duration::from_millis(100);
+/// The production value: every test here confirms well within it.
+const PENDING_TTL: Duration = Duration::from_secs(3);
 /// Generous bound for anything event-driven; far below the old 30 s probe.
 const WITHIN: Duration = Duration::from_secs(3);
 const FLAVORS: [Flavor; 2] = [Flavor::Hadess, Flavor::UPower];
@@ -40,6 +42,7 @@ fn start_hub_with(connector: Connector, instances: &[&str]) -> Running {
         renderer,
         HubConfig {
             retry_interval: RETRY,
+            pending_ttl: PENDING_TTL,
         },
     );
     for id in instances {
@@ -179,6 +182,47 @@ async fn quick_consecutive_detents_each_take_a_step() {
     running
         .rendered
         .expect(known(Profile::Performance), WITHIN)
+        .await;
+}
+
+/// Forward, forward, back - with the first step confirmed before the reversal
+/// but the second not yet - must land one below the *last request*
+/// (Performance - 1 = Balanced), not one below the confirmed profile.
+#[tokio::test]
+async fn a_quick_reversal_steps_from_the_last_request() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "power-saver").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::PowerSaver), WITHIN)
+        .await;
+
+    provider.delay_signals_by(Duration::from_millis(300));
+    let start = tokio::time::Instant::now();
+    running.hub.request(Request::Step(1)).await.unwrap();
+    tokio::time::sleep_until(start + Duration::from_millis(200)).await;
+    running.hub.request(Request::Step(1)).await.unwrap();
+    // Balanced (announced at ~300 ms) is confirmed; Performance (~500 ms) is not.
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+    tokio::time::sleep_until(start + Duration::from_millis(350)).await;
+    running.hub.request(Request::Step(-1)).await.unwrap();
+    assert_eq!(provider.profile(), "balanced");
+
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+    running
+        .rendered
+        .expect_quiet(Duration::from_millis(500))
         .await;
 }
 
