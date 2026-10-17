@@ -99,11 +99,29 @@ impl PrivateBus {
 
     /// Connects the hub to this bus instead of the system bus.
     pub fn connector(&self) -> Connector {
+        self.connector_built_with(|builder| builder)
+    }
+
+    /// Like [`Self::connector`], but every method call on the connection
+    /// fails once it has waited `timeout`, as production's does.
+    pub fn connector_with_timeout(&self, timeout: Duration) -> Connector {
+        self.connector_built_with(move |builder| builder.method_timeout(timeout))
+    }
+
+    fn connector_built_with(
+        &self,
+        configure: impl Fn(zbus::connection::Builder<'static>) -> zbus::connection::Builder<'static>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Connector {
         let address = self.address.clone();
+        let configure = Arc::new(configure);
         Arc::new(move || {
             let address = address.clone();
+            let configure = configure.clone();
             Box::pin(async move {
-                zbus::connection::Builder::address(address.as_str())?
+                configure(zbus::connection::Builder::address(address.as_str())?)
                     .build()
                     .await
             })

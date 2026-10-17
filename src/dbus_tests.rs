@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use crate::decision::{Profile, ProfileState, Request};
-use crate::hub::{HubConfig, ProfileHub, RequestError};
+use crate::hub::{Connector, HubConfig, ProfileHub, RequestError};
 use crate::test_support::{FakeProvider, Flavor, PrivateBus, Rendered, recording_renderer};
 
 const RETRY: Duration = Duration::from_millis(100);
@@ -29,6 +29,10 @@ impl Drop for Running {
 }
 
 fn start_hub(bus: &PrivateBus, instances: &[&str]) -> Running {
+    start_hub_with(bus.connector(), instances)
+}
+
+fn start_hub_with(connector: Connector, instances: &[&str]) -> Running {
     // Hub warnings show up in a failing test's captured output.
     crate::test_support::init_test_logging();
     let (renderer, rendered) = recording_renderer();
@@ -41,7 +45,7 @@ fn start_hub(bus: &PrivateBus, instances: &[&str]) -> Running {
     for id in instances {
         hub.track(id);
     }
-    let task = tokio::spawn(hub.clone().run(bus.connector()));
+    let task = tokio::spawn(hub.clone().run(connector));
     Running {
         hub,
         rendered,
@@ -252,6 +256,53 @@ async fn a_hung_set_does_not_delay_noticing_the_provider_is_gone() {
     running
         .rendered
         .expect(ProfileState::Unavailable, Duration::from_secs(1))
+        .await;
+}
+
+/// A Set that outlasts the connection's method timeout fails like any other
+/// failed Set, so the dial gets its alert and the next detent steps from
+/// what the provider confirmed rather than from the abandoned target.
+#[tokio::test]
+async fn a_set_that_outlasts_the_method_timeout_fails() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let mut running = start_hub_with(
+        bus.connector_with_timeout(Duration::from_millis(300)),
+        &["dial"],
+    );
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    let stall = Duration::from_secs(2);
+    provider.delay_sets_by(stall);
+    let stalled_at = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        running.hub.request(Request::Step(1)),
+    )
+    .await
+    .expect("the Set was not bounded by the method timeout");
+    assert!(
+        matches!(result, Err(RequestError::Dbus(_))),
+        "expected a D-Bus error, got {result:?}"
+    );
+    assert_eq!(provider.profile(), "balanced");
+
+    // The provider still applies the abandoned Set once its stall ends; the
+    // watch loop renders that, and the next detent steps from it.
+    provider.delay_sets_by(Duration::ZERO);
+    tokio::time::sleep_until(stalled_at + stall).await;
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+    running.hub.request(Request::Step(-1)).await.unwrap();
+    assert_eq!(provider.profile(), "balanced");
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
         .await;
 }
 
