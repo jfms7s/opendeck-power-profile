@@ -38,7 +38,6 @@ jobs:
       - name: Test with coverage (eng-metrics-lab)
         run: cargo llvm-cov --locked --lcov --output-path "$RUNNER_TEMP/coverage-rust.lcov"
       # Only reached when every step above passed, so a red test leaves no fragment.
-      # macOS-only cfg code isn't compiled here: a known coverage gap.
       - name: Collect coverage fragment (eng-metrics-lab)
         run: |
           mkdir -p .quality
