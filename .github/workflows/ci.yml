@@ -25,12 +25,30 @@ jobs:
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
       - name: Install dbus-daemon (the D-Bus tests run a private bus)
         run: command -v dbus-daemon || { sudo apt-get update && sudo apt-get install -y dbus-daemon; }
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      # Replaces `cargo test`: the same tests, instrumented. The fragment waits in
+      # RUNNER_TEMP until every test in the job has passed (see the collect step).
+      - name: Test with coverage (eng-metrics-lab)
+        run: cargo llvm-cov --locked --lcov --output-path "$RUNNER_TEMP/coverage-rust.lcov"
+      # Only reached when every step above passed, so a red test leaves no fragment.
+      # macOS-only cfg code isn't compiled here: a known coverage gap.
+      - name: Collect coverage fragment (eng-metrics-lab)
+        run: |
+          mkdir -p .quality
+          mv "$RUNNER_TEMP/coverage-rust.lcov" .quality/coverage-rust.lcov
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-fragments
+          path: .quality/coverage-rust.lcov
+          include-hidden-files: true
+          retention-days: 7
 
   # Builds and packages exactly as release.yml does, so a packaging break shows
   # up on the pull request rather than when a tag is pushed.
@@ -86,12 +104,19 @@ jobs:
 
   # eng-metrics-lab (report-only): duplication, complexity and dead code; the collector picks up the artifact.
   quality:
+    needs: [test]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions: {contents: read, packages: read}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-fragments
+          path: .quality
+        continue-on-error: true
       - name: Code quality (report-only)
         uses: jfms7s/eng-metrics-lab/action@v0
         continue-on-error: true
