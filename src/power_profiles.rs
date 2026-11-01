@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use futures_util::{Stream, StreamExt, stream};
 use thiserror::Error;
 use zbus::proxy::CacheProperties;
-use zbus::zvariant::{OwnedValue, Value};
 use zbus::{Connection, proxy};
+use zbus::{OwnedVariant, Variant};
 
 use crate::decision::{Available, Conditions, Hold, Profile};
 
@@ -36,7 +36,7 @@ const PROFILES: &str = "Profiles";
 
 /// One `ActiveProfileHolds` or `Profiles` entry as it comes off the bus
 /// (`a{sv}`).
-type RawHold = HashMap<String, OwnedValue>;
+type RawHold = HashMap<String, OwnedVariant>;
 
 // Must match `BUS_NAME`, `OBJECT_PATH` and `INTERFACE` (the macro needs
 // literals).
@@ -99,7 +99,7 @@ fn holds_from(raw: &[RawHold]) -> Vec<Hold> {
 }
 
 /// Decodes an `ActiveProfileHolds` value from a signal, if it is an `aa{sv}`.
-fn holds_from_value(value: &Value<'_>) -> Option<Vec<Hold>> {
+fn holds_from_value(value: &Variant<'_>) -> Option<Vec<Hold>> {
     let owned = value.try_to_owned().ok()?;
     let raw = Vec::<RawHold>::try_from(owned).ok()?;
     Some(holds_from(&raw))
@@ -107,7 +107,7 @@ fn holds_from_value(value: &Value<'_>) -> Option<Vec<Hold>> {
 
 /// Everything one `PropertiesChanged` signal for `interface` says.
 fn updates_from(
-    changed: &HashMap<&str, Value<'_>>,
+    changed: &HashMap<&str, Variant<'_>>,
     invalidated: &[&str],
     interface: &str,
 ) -> Vec<ProfileUpdate> {
@@ -254,8 +254,8 @@ impl PowerProfilesClient {
         &self,
     ) -> Result<impl Stream<Item = ProfileUpdate> + 'static, PowerProfilesError> {
         let properties = zbus::fdo::PropertiesProxy::builder(self.proxy.inner().connection())
-            .destination(BUS_NAME)?
-            .path(OBJECT_PATH)?
+            .destination(BUS_NAME)
+            .path(OBJECT_PATH)
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
@@ -283,7 +283,7 @@ impl PowerProfilesClient {
 mod tests {
     use super::*;
 
-    fn raw(fields: &[(&str, Value<'static>)]) -> RawHold {
+    fn raw(fields: &[(&str, Variant<'static>)]) -> RawHold {
         fields
             .iter()
             .map(|(k, v)| (k.to_string(), v.try_to_owned().unwrap()))
@@ -296,15 +296,15 @@ mod tests {
             raw(&[
                 (
                     "ApplicationId",
-                    Value::from("com.feralinteractive.GameMode"),
+                    Variant::from("com.feralinteractive.GameMode"),
                 ),
-                ("Profile", Value::from("performance")),
-                ("Reason", Value::from("game")),
-                ("Extra", Value::from(7u32)),
+                ("Profile", Variant::from("performance")),
+                ("Reason", Variant::from("game")),
+                ("Extra", Variant::from(7u32)),
             ]),
             raw(&[
-                ("Profile", Value::from("power-saver")),
-                ("ApplicationId", Value::from(1u32)),
+                ("Profile", Variant::from("power-saver")),
+                ("ApplicationId", Variant::from(1u32)),
             ]),
             raw(&[]),
         ]);
@@ -327,14 +327,14 @@ mod tests {
 
     #[test]
     fn one_signal_can_carry_every_property() {
-        let holds = Value::from(vec![HashMap::from([(
+        let holds = Variant::from(vec![HashMap::from([(
             "ApplicationId".to_string(),
-            Value::from("app"),
+            Variant::from("app"),
         )])]);
         let changed = HashMap::from([
-            (ACTIVE_PROFILE, Value::from("balanced")),
+            (ACTIVE_PROFILE, Variant::from("balanced")),
             (ACTIVE_PROFILE_HOLDS, holds),
-            (PERFORMANCE_DEGRADED, Value::from("lap-detected")),
+            (PERFORMANCE_DEGRADED, Variant::from("lap-detected")),
         ]);
         assert_eq!(
             updates_from(&changed, &[], "i"),
@@ -352,8 +352,8 @@ mod tests {
     #[test]
     fn unusable_or_invalidated_conditions_ask_for_one_re_read() {
         let changed = HashMap::from([
-            (ACTIVE_PROFILE_HOLDS, Value::from("not an array")),
-            (PERFORMANCE_DEGRADED, Value::from(3u32)),
+            (ACTIVE_PROFILE_HOLDS, Variant::from("not an array")),
+            (PERFORMANCE_DEGRADED, Variant::from(3u32)),
         ]);
         assert_eq!(
             updates_from(&changed, &[], "i"),

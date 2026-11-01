@@ -58,7 +58,7 @@ async fn main() -> OpenActionResult<()> {
     );
     let connector: Connector = Arc::new(|| {
         Box::pin(async {
-            zbus::connection::Builder::system()?
+            zbus::connection::Builder::system()
                 .method_timeout(METHOD_TIMEOUT)
                 .build()
                 .await
