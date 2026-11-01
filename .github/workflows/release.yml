@@ -4,6 +4,9 @@ name: Release
 # SHA256SUMS file, and creates a *draft* release with both attached - so no
 # release is ever visible without its asset. Run the README smoke test, then
 # publish the draft; Ansible only installs the latest published release.
+# Publishing freezes it: immutable releases are on for this repository, so a
+# published release's assets and tag can't be replaced - fix a bad release
+# with a new version.
 on:
   push:
     tags: ["v*"]
