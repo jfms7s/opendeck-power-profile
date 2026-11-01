@@ -6,8 +6,7 @@
 	"Icon": "icons/icon",
 	"OS": [{ "Platform": "linux" }],
 	"CodePaths": {
-		"x86_64-unknown-linux-gnu": "opendeck-power-profile-x86_64-unknown-linux-gnu",
-		"aarch64-unknown-linux-gnu": "opendeck-power-profile-aarch64-unknown-linux-gnu"
+		"x86_64-unknown-linux-gnu": "opendeck-power-profile-x86_64-unknown-linux-gnu"
 	},
 	"CodePathLin": "opendeck-power-profile-x86_64-unknown-linux-gnu",
 	"Actions": [

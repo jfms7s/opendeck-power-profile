@@ -62,18 +62,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
-      - name: Install cross-compilation linker (aarch64)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          targets: x86_64-unknown-linux-gnu
       - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
-      - run: cargo build --release --locked --target aarch64-unknown-linux-gnu
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - run: node build.mjs --release x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+      - run: node build.mjs --release x86_64-unknown-linux-gnu
       # The Release workflow builds the draft's notes from the README's smoke
       # checklist markers; catch a broken marker here, not on a pushed tag.
       - run: node scripts/release-body.mjs > /dev/null
