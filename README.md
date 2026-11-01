@@ -29,6 +29,15 @@ power-profiles-daemon releases that only export that one.
 - The touch strip updates live even when the profile changes from somewhere else (a
   desktop applet, another key, `powerprofilesctl` in a terminal) - it subscribes to the
   provider's D-Bus change notifications rather than polling.
+- **Cooling follows the profile** when [OpenLinkHub](https://github.com/jurkovic-nikola/OpenLinkHub)
+  runs on this machine (its API on `127.0.0.1:27003`): after the provider confirms a change
+  from one profile to another, from the dial or from anywhere else, fan channels whose
+  speed profile is `Quiet`, `Normal` or `Performance` switch to the matching one (Power
+  Saver -> `Quiet`, Balanced -> `Normal`, Performance -> `Performance`). Channels on any
+  other curve are left alone, and nothing is written when the plugin starts or reconnects.
+  It is best effort: without OpenLinkHub, or if it doesn't answer within 2 seconds, the
+  dial works as before and the plugin log gets one warning. Each switch is logged as
+  `cooling sync: ...`.
 - If the provider goes away (its process exits or its service is stopped) the dial shows
   "Unavailable" as soon as the bus reports its name gone, and the plugin tries to reconnect
   every 5 seconds; once the provider is back the dial shows the real current profile within
@@ -83,6 +92,11 @@ link.
       (needs PyGObject, which tuned-ppd already pulls in). The dial moves to Performance
       and shows "Held by smoke-app"; Ctrl+C releases the hold and the line clears. Run it
       again and turn the dial instead: it steps as usual and the line clears.
+- [ ] With OpenLinkHub running and a fan channel on `Quiet`, `Normal` or `Performance`:
+      turning the dial to Performance switches that channel to `Performance` within a
+      second (OpenLinkHub's page shows it, and the plugin log has a `cooling sync:` line);
+      turning back to Balanced switches it to `Normal`. A channel on a custom curve stays
+      as it was. Restarting OpenDeck does not change any channel.
 - [ ] `sudo systemctl mask --runtime <unit> && sudo systemctl stop <unit>` makes the dial
       show "Unavailable" within a second or two and keeps it there (masking stops the
       plugin's reconnect from D-Bus-activating the provider again).

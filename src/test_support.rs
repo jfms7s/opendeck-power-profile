@@ -457,3 +457,163 @@ impl Rendered {
         }
     }
 }
+
+/// One request the fake OpenLinkHub received.
+#[derive(Debug, Clone)]
+struct HttpRequest {
+    method: String,
+    path: String,
+    body: String,
+}
+
+#[derive(Default)]
+struct FakeHubState {
+    requests: Mutex<Vec<HttpRequest>>,
+    refuse_writes: AtomicBool,
+}
+
+/// A local stand-in for OpenLinkHub's HTTP API on a random loopback port:
+/// answers `GET /api/` with a fixture and `POST /api/speed` with success
+/// (or a refusal), recording every request. Aborted on drop.
+pub struct FakeOpenLinkHub {
+    addr: String,
+    state: Arc<FakeHubState>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeOpenLinkHub {
+    pub async fn start(api_response: &'static str) -> Self {
+        Self::serve(Some(api_response)).await
+    }
+
+    /// Accepts connections and never answers.
+    pub async fn silent() -> Self {
+        Self::serve(None).await
+    }
+
+    async fn serve(api_response: Option<&'static str>) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let state = Arc::new(FakeHubState::default());
+        let served = state.clone();
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                match api_response {
+                    None => held.push(stream),
+                    Some(api) => {
+                        tokio::spawn(answer(stream, api, served.clone()));
+                    }
+                }
+            }
+        });
+        Self { addr, state, task }
+    }
+
+    pub fn addr(&self) -> String {
+        self.addr.clone()
+    }
+
+    /// A client for this server with a short timeout.
+    pub fn client(&self) -> crate::cooling::OpenLinkHub {
+        crate::cooling::OpenLinkHub::new(self.addr(), Duration::from_secs(1))
+    }
+
+    pub fn refuse_writes(&self) {
+        self.state.refuse_writes.store(true, Ordering::SeqCst);
+    }
+
+    /// How many requests arrived, of any kind.
+    pub fn requests(&self) -> usize {
+        self.state.requests.lock().unwrap().len()
+    }
+
+    /// The bodies of every `POST /api/speed` so far.
+    pub fn posts(&self) -> Vec<String> {
+        self.state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "POST" && r.path == "/api/speed")
+            .map(|r| r.body.clone())
+            .collect()
+    }
+
+    /// Waits until at least `count` writes arrived, then a little longer to
+    /// catch extra ones, and returns them all.
+    pub async fn wait_for_posts(&self, count: usize, within: Duration) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + within;
+        while self.posts().len() < count {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "expected {count} POST /api/speed within {within:?}, got {:?}",
+                self.posts()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        self.posts()
+    }
+}
+
+impl Drop for FakeOpenLinkHub {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn answer(mut stream: tokio::net::TcpStream, api: &'static str, state: Arc<FakeHubState>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    let body_start = loop {
+        let n = stream.read(&mut buf).await.unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&raw[..body_start]).to_string();
+    let length: usize = head
+        .lines()
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|v| v.trim().parse().unwrap_or(0))
+        })
+        .unwrap_or(0);
+    while raw.len() < body_start + length {
+        let n = stream.read(&mut buf).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+    }
+    let mut request_line = head.lines().next().unwrap_or("").split_whitespace();
+    let request = HttpRequest {
+        method: request_line.next().unwrap_or("").to_string(),
+        path: request_line.next().unwrap_or("").to_string(),
+        body: String::from_utf8_lossy(&raw[body_start..]).to_string(),
+    };
+    let reply = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/api/") => api.to_string(),
+        ("POST", "/api/speed") if state.refuse_writes.load(Ordering::SeqCst) => {
+            r#"{"code":200,"status":0,"message":"Unable to apply speed profile"}"#.to_string()
+        }
+        ("POST", "/api/speed") => {
+            r#"{"code":200,"status":1,"message":"Speed profile successfully applied"}"#.to_string()
+        }
+        _ => r#"{"code":404,"status":0}"#.to_string(),
+    };
+    state.requests.lock().unwrap().push(request);
+    let response = format!("HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{reply}");
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
+}

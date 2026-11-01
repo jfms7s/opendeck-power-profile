@@ -31,6 +31,14 @@ pub trait Renderer: Send + Sync + 'static {
     async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot);
 }
 
+/// Told about every change the touch strip shows, with what it showed
+/// before. Knows nothing about instances or drawing; the cooling sync is one.
+/// Runs on the watch loop, so it must not block or await: hand slow work to
+/// a task of its own.
+pub trait ProfileObserver: Send + Sync + 'static {
+    fn changed(&self, previous: &Snapshot, current: &Snapshot);
+}
+
 /// Opens a fresh bus connection for each (re)connect attempt.
 pub type Connector = Arc<dyn Fn() -> BoxFuture<'static, zbus::Result<Connection>> + Send + Sync>;
 
@@ -145,6 +153,7 @@ impl View {
 
 struct Inner {
     renderer: Arc<dyn Renderer>,
+    observers: Vec<Arc<dyn ProfileObserver>>,
     config: HubConfig,
     // Plain mutexes: none of them is ever held across an `.await`.
     client: Mutex<Option<PowerProfilesClient>>,
@@ -183,10 +192,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl ProfileHub {
-    pub fn new(renderer: Arc<dyn Renderer>, config: HubConfig) -> Self {
+    pub fn new(
+        renderer: Arc<dyn Renderer>,
+        observers: Vec<Arc<dyn ProfileObserver>>,
+        config: HubConfig,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 renderer,
+                observers,
                 config,
                 client: Mutex::new(None),
                 view: Mutex::new(View::new(config.pending_ttl)),
@@ -220,16 +234,20 @@ impl ProfileHub {
     /// Records whichever of the two is given and renders once if either
     /// changed what the strip shows.
     async fn apply(&self, state: Option<ProfileState>, conditions: Option<Conditions>) {
-        let snapshot = {
+        let (previous, snapshot) = {
             let mut view = lock(&self.inner.view);
+            let previous = view.snapshot();
             let state_changed = state.is_some_and(|state| view.confirm(state));
             let conditions_changed =
                 conditions.is_some_and(|conditions| view.set_conditions(conditions));
             if !state_changed && !conditions_changed {
                 return;
             }
-            view.snapshot()
+            (previous, view.snapshot())
         };
+        for observer in &self.inner.observers {
+            observer.changed(&previous, &snapshot);
+        }
         let instance_ids: Vec<String> = lock(&self.inner.registry).iter().cloned().collect();
         self.inner
             .renderer

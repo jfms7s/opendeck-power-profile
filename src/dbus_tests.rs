@@ -3,13 +3,17 @@
 //! `dbus-daemon` installed, nothing else - no system bus, no OpenDeck, and the
 //! machine's real power profile is never touched.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
+use crate::cooling::{CoolingSync, OpenLinkHub};
 use crate::decision::{Profile, ProfileState, Request};
-use crate::hub::{Connector, HubConfig, ProfileHub, RequestError};
-use crate::test_support::{FakeProvider, Flavor, PrivateBus, Rendered, recording_renderer};
+use crate::hub::{Connector, HubConfig, ProfileHub, ProfileObserver, RequestError};
+use crate::test_support::{
+    FakeOpenLinkHub, FakeProvider, Flavor, PrivateBus, Rendered, recording_renderer,
+};
 
 const RETRY: Duration = Duration::from_millis(100);
 /// The production value: every test here confirms well within it.
@@ -35,11 +39,20 @@ fn start_hub(bus: &PrivateBus, instances: &[&str]) -> Running {
 }
 
 fn start_hub_with(connector: Connector, instances: &[&str]) -> Running {
+    start_hub_observed(connector, instances, Vec::new())
+}
+
+fn start_hub_observed(
+    connector: Connector,
+    instances: &[&str],
+    observers: Vec<Arc<dyn ProfileObserver>>,
+) -> Running {
     // Hub warnings show up in a failing test's captured output.
     crate::test_support::init_test_logging();
     let (renderer, rendered) = recording_renderer();
     let hub = ProfileHub::new(
         renderer,
+        observers,
         HubConfig {
             retry_interval: RETRY,
             pending_ttl: PENDING_TTL,
@@ -515,4 +528,76 @@ async fn losing_the_provider_clears_its_holds() {
         snapshot,
         crate::decision::Snapshot::plain(ProfileState::Unavailable)
     );
+}
+
+const OPENLINKHUB_FIXTURE: &str = include_str!("../tests/fixtures/openlinkhub-api.json");
+
+fn cooling(server: &FakeOpenLinkHub) -> Vec<Arc<dyn ProfileObserver>> {
+    vec![Arc::new(CoolingSync::start(server.client()))]
+}
+
+/// The cooling sync writes on a real change, and never for the seed render
+/// after connecting or after the provider comes back.
+#[tokio::test]
+async fn cooling_follows_changes_but_not_connects_or_reconnects() {
+    let bus = PrivateBus::start();
+    let server = FakeOpenLinkHub::start(OPENLINKHUB_FIXTURE).await;
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let mut running = start_hub_observed(bus.connector(), &["dial"], cooling(&server));
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    provider.change_externally("performance").await;
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+    let posts = server.wait_for_posts(1, WITHIN).await;
+    assert!(posts[0].contains("\"Performance\""), "{posts:?}");
+
+    // The provider restarts on another profile: Unavailable, then the seed.
+    provider.stop().await;
+    running
+        .rendered
+        .expect(ProfileState::Unavailable, WITHIN)
+        .await;
+    let _provider = FakeProvider::start(&bus, Flavor::UPower, "power-saver").await;
+    running
+        .rendered
+        .expect(known(Profile::PowerSaver), WITHIN)
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(server.posts().len(), 1, "{:?}", server.posts());
+}
+
+/// An OpenLinkHub that accepts but never answers must not slow the dial.
+#[tokio::test]
+async fn a_hung_openlinkhub_never_delays_rendering() {
+    let bus = PrivateBus::start();
+    let server = FakeOpenLinkHub::silent().await;
+    let observers: Vec<Arc<dyn ProfileObserver>> = vec![Arc::new(CoolingSync::start(
+        OpenLinkHub::new(server.addr(), Duration::from_secs(30)),
+    ))];
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let mut running = start_hub_observed(bus.connector(), &["dial"], observers);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    for (profile, state) in [
+        ("performance", known(Profile::Performance)),
+        ("power-saver", known(Profile::PowerSaver)),
+        ("balanced", known(Profile::Balanced)),
+    ] {
+        provider.change_externally(profile).await;
+        running
+            .rendered
+            .expect(state, Duration::from_millis(500))
+            .await;
+    }
+    running.hub.request(Request::Step(1)).await.unwrap();
+    assert_eq!(provider.profile(), "performance");
 }
