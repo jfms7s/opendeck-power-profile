@@ -14,7 +14,7 @@
 // Cargo.toml, so nothing here is specific to one plugin.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 function fail(message) {
@@ -68,8 +68,11 @@ function hostTriple() {
 const binaries = new Map(); // triple -> path of its release binary
 if (targets.length === 0) {
 	const triple = hostTriple();
-	const candidates = [join("target", triple, "release", binName), join("target", "release", binName)];
-	const found = candidates.find(existsSync) ?? fail(`missing release binary (run: cargo build --release --locked)`);
+	// Either location can hold a host build; bundle the one built last.
+	const candidates = [join("target", triple, "release", binName), join("target", "release", binName)].filter(existsSync);
+	if (candidates.length === 0) fail(`missing release binary (run: cargo build --release --locked)`);
+	const found = candidates.reduce((a, b) => (statSync(b).mtimeMs > statSync(a).mtimeMs ? b : a));
+	console.log(`using ${found}`);
 	binaries.set(triple, found);
 } else {
 	for (const triple of targets) {
@@ -82,7 +85,12 @@ if (targets.length === 0) {
 // --- bundle ----------------------------------------------------------------
 const bundleName = `${uuid}.sdPlugin`;
 const outDir = join("dist", bundleName);
+const zipName = `${binName}.streamDeckPlugin`;
 rmSync(outDir, { recursive: true, force: true });
+// Never leave a release package that doesn't match this bundle; zip also
+// appends to an existing archive, so --release needs it gone too.
+rmSync(join("dist", zipName), { force: true });
+rmSync(join("dist", "SHA256SUMS"), { force: true });
 mkdirSync(outDir, { recursive: true });
 
 cpSync("assets/manifest.json", join(outDir, "manifest.json"));
@@ -108,8 +116,6 @@ console.log(`built ${outDir} for ${[...binaries.keys()].join(", ")}`);
 
 // --- release package -------------------------------------------------------
 if (release) {
-	const zipName = `${binName}.streamDeckPlugin`;
-	rmSync(join("dist", zipName), { force: true }); // zip appends to an existing archive
 	execFileSync("zip", ["-r", "-X", "-q", zipName, bundleName], { cwd: "dist", stdio: "inherit" });
 	const digest = createHash("sha256").update(readFileSync(join("dist", zipName))).digest("hex");
 	writeFileSync(join("dist", "SHA256SUMS"), `${digest}  ${zipName}\n`);
