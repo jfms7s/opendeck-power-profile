@@ -1,6 +1,6 @@
 name: Release
 # Push a tag `v<version>` matching Cargo.toml and assets/manifest.json. This
-# re-runs the checks, builds the x86_64 Linux binary, packages the bundle with a
+# re-runs the checks and the advisory scan, builds the x86_64 Linux binary, packages the bundle with a
 # SHA256SUMS file, and creates a *draft* release with both attached - so no
 # release is ever visible without its asset. The draft's notes start with the
 # README's smoke-test checklist, unticked (scripts/release-body.mjs). Run that
@@ -38,10 +38,25 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
+  # A tag can't produce a release past a known RustSec advisory (same check as
+  # advisories.yml; exceptions live in deny.toml).
+  advisories:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          command-arguments: advisories
+
   # Builds with a read-only token: no dependency build script ever runs next
   # to a token that can write to the repository.
   build:
-    needs: verify
+    needs: [verify, advisories]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
