@@ -39,6 +39,16 @@ impl Profile {
             .expect("every Profile is in Profile::ALL")
     }
 
+    /// The next profile up among `available`, wrapping from the top to the
+    /// bottom and skipping profiles the provider doesn't offer; `None` when
+    /// this is the only one offered.
+    fn next_offered(self, available: Available) -> Option<Profile> {
+        let len = Profile::ALL.len();
+        (1..len)
+            .map(|offset| Profile::ALL[(self.position() + offset) % len])
+            .find(|profile| available.contains(*profile))
+    }
+
     /// The neighbouring profile one step in `direction`'s sign, or `None` if
     /// the dial is already clamped at that end (or `direction` is zero).
     pub fn step(self, direction: i16) -> Option<Profile> {
@@ -156,6 +166,19 @@ pub enum Request {
     Step(i16),
     /// A press: jump straight to `Profile::RESET`.
     Reset,
+    /// A key press: the next profile up, wrapping from the top back to the
+    /// bottom (Power Saver, Balanced, Performance, Power Saver, ...).
+    Cycle,
+}
+
+/// How long a key must be held for its release to count as a long press
+/// (reset to Balanced) rather than a press (cycle). The same threshold as
+/// the sibling plugins' hold gestures.
+pub const LONG_PRESS: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a key held for `held` was a long press.
+pub fn is_long_press(held: std::time::Duration) -> bool {
+    held >= LONG_PRESS
 }
 
 /// The profile to ask the provider for when `request` arrives in `state`, or
@@ -172,6 +195,8 @@ pub fn target_for(state: ProfileState, request: Request, available: Available) -
         (ProfileState::Known(profile), Request::Step(ticks)) => profile.step(ticks),
         (ProfileState::Unknown, Request::Step(ticks)) if ticks != 0 => Some(Profile::RESET),
         (ProfileState::Unknown, Request::Step(_)) => None,
+        (ProfileState::Known(profile), Request::Cycle) => profile.next_offered(available),
+        (ProfileState::Unknown, Request::Cycle) => Some(Profile::RESET),
     }?;
     available.contains(target).then_some(target)
 }
@@ -368,5 +393,59 @@ mod tests {
             ),
             Some(Balanced)
         );
+    }
+
+    #[test]
+    fn cycle_moves_up_and_wraps_from_the_top() {
+        assert_eq!(
+            target_for(ProfileState::Known(PowerSaver), Request::Cycle, ALL),
+            Some(Balanced)
+        );
+        assert_eq!(
+            target_for(ProfileState::Known(Balanced), Request::Cycle, ALL),
+            Some(Performance)
+        );
+        assert_eq!(
+            target_for(ProfileState::Known(Performance), Request::Cycle, ALL),
+            Some(PowerSaver)
+        );
+    }
+
+    #[test]
+    fn cycle_from_unknown_falls_back_to_the_reset_profile_and_unavailable_does_nothing() {
+        assert_eq!(
+            target_for(ProfileState::Unknown, Request::Cycle, ALL),
+            Some(Balanced)
+        );
+        assert_eq!(
+            target_for(ProfileState::Unavailable, Request::Cycle, ALL),
+            None
+        );
+    }
+
+    #[test]
+    fn cycle_skips_a_profile_the_provider_does_not_offer() {
+        assert_eq!(
+            target_for(
+                ProfileState::Known(Balanced),
+                Request::Cycle,
+                NO_PERFORMANCE
+            ),
+            Some(PowerSaver)
+        );
+        let only_balanced = Available([false, true, false]);
+        assert_eq!(
+            target_for(ProfileState::Known(Balanced), Request::Cycle, only_balanced),
+            None
+        );
+    }
+
+    #[test]
+    fn a_release_at_the_threshold_is_a_long_press() {
+        assert!(!is_long_press(
+            LONG_PRESS - std::time::Duration::from_millis(1)
+        ));
+        assert!(is_long_press(LONG_PRESS));
+        assert!(is_long_press(std::time::Duration::from_secs(3)));
     }
 }

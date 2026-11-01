@@ -50,6 +50,18 @@ name, which tuned-ppd and power-profiles-daemon 0.20 and later export.
   attempt starts the provider again by itself and "Unavailable" lasts only a moment, unless
   its service is masked.
 
+## Using a key
+
+The same action also goes on a key, for a page whose dial slots are taken:
+
+- **Press** to cycle to the next profile, wrapping around: Power Saver -> Balanced ->
+  Performance -> Power Saver. A profile the provider doesn't offer is skipped. Quick
+  presses each move one profile, like quick dial detents.
+- **Hold** for half a second or more, then release, to jump straight to Balanced.
+- The key shows the profile's glyph in its colour (leaf, gauge, bolt) with the profile's
+  name as its title, and follows changes from anywhere else live, like the touch strip. It
+  shows an empty grey gauge while the profile is unknown or the provider is unavailable.
+
 ## Installing
 
 Download the latest `.streamDeckPlugin` from
@@ -87,6 +99,11 @@ link.
 - [ ] Pressing the dial from any profile jumps straight to Balanced.
 - [ ] Pressing the dial while already at Balanced changes nothing visible and adds no
       `[WARN]` to the plugin log.
+- [ ] A Power Profile key shows the current profile's glyph in its colour and its name;
+      pressing it cycles Power Saver -> Balanced -> Performance -> Power Saver, and a
+      profile changed from outside updates it live.
+- [ ] Holding the key for about a second, then releasing it, jumps to Balanced from
+      Power Saver and from Performance; a short press never does.
 - [ ] Changing the profile from outside updates the dial's touch strip immediately,
       without touching the dial: use the desktop's power applet, `powerprofilesctl set
       performance`, or (with no `powerprofilesctl`, as with tuned-ppd)

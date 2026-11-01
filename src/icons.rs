@@ -30,25 +30,48 @@ fn opacity_for(enabled: bool) -> f64 {
     if enabled { 1.0 } else { DIMMED_OPACITY }
 }
 
+const LEAF: &str = r#"<path d="M5 19C5 10 10 5 20 4C20 14 15 19 5 19Z"/><path d="M5 19L13 11"/>"#;
+const BOLT: &str = r#"<path d="M13 2L4 14H11L10 22L20 10H13Z"/>"#;
+
 /// Leaf - the "rotate left" hint towards Power Saver.
 pub fn leaf(enabled: bool) -> String {
-    svg(
-        opacity_for(enabled),
-        r#"<path d="M5 19C5 10 10 5 20 4C20 14 15 19 5 19Z"/><path d="M5 19L13 11"/>"#,
-    )
+    svg(opacity_for(enabled), LEAF)
 }
 
 /// Lightning bolt - the "rotate right" hint towards Performance.
 pub fn bolt(enabled: bool) -> String {
-    svg(
-        opacity_for(enabled),
-        r#"<path d="M13 2L4 14H11L10 22L20 10H13Z"/>"#,
+    svg(opacity_for(enabled), BOLT)
+}
+
+/// What a key shows as its image.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Glyph {
+    Leaf,
+    Bolt,
+    Gauge(Option<Needle>),
+}
+
+/// A 144x144 key image: `glyph` stroked in `color` on black, in the upper
+/// part of the key (OpenDeck draws the title below it).
+pub fn key_tile(glyph: Glyph, color: &str) -> String {
+    let body = match glyph {
+        Glyph::Leaf => LEAF.to_string(),
+        Glyph::Bolt => BOLT.to_string(),
+        Glyph::Gauge(needle) => gauge_body(needle, color),
+    };
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144"><rect width="144" height="144" fill="#000000"/><svg x="32" y="16" width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg></svg>"##
     )
 }
 
 /// Speedometer arc in `dial_color`, with `needle` drawn over it. `None`
 /// draws an empty dial (no needle) for unknown/unavailable.
 pub fn gauge(needle: Option<Needle>, dial_color: &str) -> String {
+    svg(1.0, &gauge_body(needle, dial_color))
+}
+
+/// The gauge's paths, without the surrounding `<svg>`.
+fn gauge_body(needle: Option<Needle>, dial_color: &str) -> String {
     let dial = format!(r#"<path d="M2.6 19.42A10 10 0 1 1 21.4 19.42" stroke="{dial_color}"/>"#);
     let needle = match needle {
         Some(Needle {
@@ -65,7 +88,7 @@ pub fn gauge(needle: Option<Needle>, dial_color: &str) -> String {
         }
         None => String::new(),
     };
-    svg(1.0, &format!("{dial}{needle}"))
+    format!("{dial}{needle}")
 }
 
 #[cfg(test)]

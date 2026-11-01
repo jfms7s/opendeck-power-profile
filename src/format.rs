@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::decision::{Profile, ProfileState, Snapshot, can_step};
-use crate::icons::{self, Needle};
+use crate::icons::{self, Glyph, Needle};
 
 const DISABLED_COLOR: &str = "#6b7280";
 
@@ -115,6 +115,59 @@ pub fn feedback_for(snapshot: &Snapshot) -> Value {
         "right": icons::bolt(can_step(state, 1, snapshot.available)),
         "status": status_text(snapshot),
     })
+}
+
+/// A key's title: the profile's name, "Unknown" or "Unavailable".
+pub fn title_for(snapshot: &Snapshot) -> &'static str {
+    match snapshot.state {
+        ProfileState::Known(profile) => style(profile).name,
+        ProfileState::Unknown => "Unknown",
+        ProfileState::Unavailable => "Unavailable",
+    }
+}
+
+/// A key's image as a `data:image/svg+xml;base64,` URI: the profile's glyph
+/// (leaf, gauge, bolt) in its colour; an empty grey gauge when the profile
+/// is unknown or unavailable.
+pub fn tile_image_for(snapshot: &Snapshot) -> String {
+    let svg = match snapshot.state {
+        ProfileState::Known(profile) => {
+            let style = style(profile);
+            let glyph = match profile {
+                Profile::PowerSaver => Glyph::Leaf,
+                Profile::Balanced => Glyph::Gauge(Some(Needle {
+                    angle_degrees: style.needle_angle,
+                    color: style.color,
+                })),
+                Profile::Performance => Glyph::Bolt,
+            };
+            icons::key_tile(glyph, style.color)
+        }
+        ProfileState::Unknown | ProfileState::Unavailable => {
+            icons::key_tile(Glyph::Gauge(None), DISABLED_COLOR)
+        }
+    };
+    format!("data:image/svg+xml;base64,{}", base64(svg.as_bytes()))
+}
+
+/// Standard base64 with padding (RFC 4648), enough for a data URI.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 0x3f) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -342,5 +395,75 @@ mod tests {
                 assert!(root.attribute("viewBox").is_some(), "{key} for {state:?}");
             }
         }
+    }
+
+    /// Decodes standard padded base64; the test's own check on `base64`.
+    fn decode_base64(text: &str) -> Vec<u8> {
+        const ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut bits = 0u32;
+        let mut count = 0;
+        let mut out = Vec::new();
+        for c in text.chars().filter(|c| *c != '=') {
+            bits = bits << 6 | ALPHABET.find(c).expect("base64 character") as u32;
+            count += 6;
+            if count >= 8 {
+                count -= 8;
+                out.push((bits >> count) as u8);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn base64_matches_the_rfc_vectors() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(plain.as_bytes()), encoded, "{plain:?}");
+            assert_eq!(decode_base64(encoded), plain.as_bytes(), "{encoded:?}");
+        }
+    }
+
+    #[test]
+    fn every_key_tile_is_a_base64_svg_in_the_profile_colour() {
+        for snapshot in all_snapshots() {
+            let uri = tile_image_for(&snapshot);
+            let encoded = uri
+                .strip_prefix("data:image/svg+xml;base64,")
+                .unwrap_or_else(|| panic!("not an SVG data URI: {uri}"));
+            let svg = String::from_utf8(decode_base64(encoded)).unwrap();
+            let doc = roxmltree::Document::parse(&svg)
+                .unwrap_or_else(|e| panic!("tile for {snapshot:?} is not XML: {e}\n{svg}"));
+            assert_eq!(doc.root_element().tag_name().name(), "svg");
+            let color = match snapshot.state {
+                ProfileState::Known(profile) => style(profile).color,
+                _ => DISABLED_COLOR,
+            };
+            assert!(svg.contains(&format!(r#"stroke="{color}""#)), "{svg}");
+        }
+    }
+
+    #[test]
+    fn key_titles_name_the_state() {
+        let titles: Vec<&str> = ALL_STATES
+            .iter()
+            .map(|state| title_for(&Snapshot::plain(*state)))
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "Power Saver",
+                "Balanced",
+                "Performance",
+                "Unknown",
+                "Unavailable"
+            ]
+        );
     }
 }
