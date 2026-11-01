@@ -25,28 +25,11 @@ pub enum PowerProfilesError {
     Fdo(#[from] zbus::fdo::Error),
 }
 
-/// One D-Bus name a provider may export the interface under.
-#[derive(Debug)]
-struct BusName {
-    name: &'static str,
-    path: &'static str,
-    interface: &'static str,
-}
-
-/// Tried in order. power-profiles-daemon >= 0.20 and tuned-ppd export both;
-/// older power-profiles-daemon only has the legacy `net.hadess` name.
-const BUS_NAMES: [BusName; 2] = [
-    BusName {
-        name: "org.freedesktop.UPower.PowerProfiles",
-        path: "/org/freedesktop/UPower/PowerProfiles",
-        interface: "org.freedesktop.UPower.PowerProfiles",
-    },
-    BusName {
-        name: "net.hadess.PowerProfiles",
-        path: "/net/hadess/PowerProfiles",
-        interface: "net.hadess.PowerProfiles",
-    },
-];
+/// The one bus name, object path and interface the plugin talks to.
+/// power-profiles-daemon >= 0.20 and tuned-ppd both export it.
+const BUS_NAME: &str = "org.freedesktop.UPower.PowerProfiles";
+const OBJECT_PATH: &str = "/org/freedesktop/UPower/PowerProfiles";
+const INTERFACE: &str = "org.freedesktop.UPower.PowerProfiles";
 
 const ACTIVE_PROFILE: &str = "ActiveProfile";
 const ACTIVE_PROFILE_HOLDS: &str = "ActiveProfileHolds";
@@ -55,8 +38,8 @@ const PERFORMANCE_DEGRADED: &str = "PerformanceDegraded";
 /// One `ActiveProfileHolds` entry as it comes off the bus (`a{sv}`).
 type RawHold = HashMap<String, OwnedValue>;
 
-// The interface name, service and path here are only defaults: `connect`
-// overrides all three per `BUS_NAMES` entry.
+// Must match `BUS_NAME`, `OBJECT_PATH` and `INTERFACE` (the macro needs
+// literals).
 #[proxy(
     interface = "org.freedesktop.UPower.PowerProfiles",
     default_service = "org.freedesktop.UPower.PowerProfiles",
@@ -167,38 +150,27 @@ fn updates_from(
 #[derive(Clone)]
 pub struct PowerProfilesClient {
     proxy: PowerProfilesProxy<'static>,
-    bus_name: &'static BusName,
 }
 
 impl PowerProfilesClient {
-    /// Finds a provider on `connection`, preferring the current bus name over
-    /// the legacy one. Reads `ActiveProfile` from each candidate, so this
+    /// Finds the provider on `connection`. Reads `ActiveProfile`, so this
     /// fails when no provider is running (and none can be bus-activated),
     /// not only when the bus itself is unreachable.
     pub async fn connect(connection: &Connection) -> Result<Self, PowerProfilesError> {
-        let mut last_error = None;
-        for bus_name in &BUS_NAMES {
-            let proxy = PowerProfilesProxy::builder(connection)
-                .destination(bus_name.name)?
-                .path(bus_name.path)?
-                .interface(bus_name.interface)?
-                .cache_properties(CacheProperties::No)
-                .build()
-                .await?;
-            match proxy.active_profile().await {
-                Ok(_) => return Ok(Self { proxy, bus_name }),
-                Err(e) => {
-                    log::debug!("no power profiles provider at {}: {e}", bus_name.name);
-                    last_error = Some(e);
-                }
-            }
+        let proxy = PowerProfilesProxy::builder(connection)
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await?;
+        if let Err(e) = proxy.active_profile().await {
+            log::debug!("no power profiles provider at {BUS_NAME}: {e}");
+            return Err(e.into());
         }
-        Err(last_error.expect("BUS_NAMES is not empty").into())
+        Ok(Self { proxy })
     }
 
     /// The bus name this client talks to.
     pub fn bus_name(&self) -> &'static str {
-        self.bus_name.name
+        BUS_NAME
     }
 
     /// Reads `ActiveProfile` from the provider (never from a cache).
@@ -252,12 +224,12 @@ impl PowerProfilesClient {
         &self,
     ) -> Result<impl Stream<Item = ProfileUpdate> + 'static, PowerProfilesError> {
         let properties = zbus::fdo::PropertiesProxy::builder(self.proxy.inner().connection())
-            .destination(self.bus_name.name)?
-            .path(self.bus_name.path)?
+            .destination(BUS_NAME)?
+            .path(OBJECT_PATH)?
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
-        let interface = self.bus_name.interface;
+        let interface = INTERFACE;
         let signals = properties.receive_properties_changed().await?;
         Ok(signals.flat_map(move |signal| {
             let updates = match signal.args() {

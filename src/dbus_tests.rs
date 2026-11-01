@@ -12,7 +12,7 @@ use crate::cooling::{CoolingSync, OpenLinkHub};
 use crate::decision::{Profile, ProfileState, Request};
 use crate::hub::{Connector, HubConfig, ProfileHub, ProfileObserver, RequestError};
 use crate::test_support::{
-    FakeOpenLinkHub, FakeProvider, Flavor, PrivateBus, Rendered, recording_renderer,
+    FakeOpenLinkHub, FakeProvider, PrivateBus, Rendered, recording_renderer,
 };
 
 const RETRY: Duration = Duration::from_millis(100);
@@ -20,7 +20,6 @@ const RETRY: Duration = Duration::from_millis(100);
 const PENDING_TTL: Duration = Duration::from_secs(3);
 /// Generous bound for anything event-driven; far below the old 30 s probe.
 const WITHIN: Duration = Duration::from_secs(3);
-const FLAVORS: [Flavor; 2] = [Flavor::Hadess, Flavor::UPower];
 
 struct Running {
     hub: ProfileHub,
@@ -75,21 +74,19 @@ const fn known(profile: Profile) -> ProfileState {
 
 #[tokio::test]
 async fn renders_the_providers_profile_on_connect() {
-    for flavor in FLAVORS {
-        let bus = PrivateBus::start();
-        let _provider = FakeProvider::start(&bus, flavor, "balanced").await;
-        let mut running = start_hub(&bus, &["dial"]);
-        running
-            .rendered
-            .expect(known(Profile::Balanced), WITHIN)
-            .await;
-    }
+    let bus = PrivateBus::start();
+    let _provider = FakeProvider::start(&bus, "balanced").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
 }
 
 #[tokio::test]
 async fn unrecognised_profile_names_render_as_unknown() {
     let bus = PrivateBus::start();
-    let _provider = FakeProvider::start(&bus, Flavor::UPower, "eco").await;
+    let _provider = FakeProvider::start(&bus, "eco").await;
     let mut running = start_hub(&bus, &["dial"]);
     running.rendered.expect(ProfileState::Unknown, WITHIN).await;
 }
@@ -97,7 +94,7 @@ async fn unrecognised_profile_names_render_as_unknown() {
 #[tokio::test]
 async fn renders_external_changes() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -115,65 +112,59 @@ async fn renders_external_changes() {
 /// property cache, so a provider that died after connect was never noticed.
 #[tokio::test]
 async fn renders_unavailable_when_the_provider_goes_away() {
-    for flavor in FLAVORS {
-        let bus = PrivateBus::start();
-        let provider = FakeProvider::start(&bus, flavor, "balanced").await;
-        let mut running = start_hub(&bus, &["dial"]);
-        running
-            .rendered
-            .expect(known(Profile::Balanced), WITHIN)
-            .await;
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "balanced").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
 
-        provider.stop().await;
-        running
-            .rendered
-            .expect(ProfileState::Unavailable, WITHIN)
-            .await;
-    }
+    provider.stop().await;
+    running
+        .rendered
+        .expect(ProfileState::Unavailable, WITHIN)
+        .await;
 }
 
 /// A provider restart (package update, `systemctl restart`) with a different
 /// profile must not leave the dial showing - and stepping from - the old one.
 #[tokio::test]
 async fn resyncs_when_the_provider_restarts_with_a_different_profile() {
-    for flavor in FLAVORS {
-        let bus = PrivateBus::start();
-        let provider = FakeProvider::start(&bus, flavor, "power-saver").await;
-        let mut running = start_hub(&bus, &["dial"]);
-        running
-            .rendered
-            .expect(known(Profile::PowerSaver), WITHIN)
-            .await;
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "power-saver").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::PowerSaver), WITHIN)
+        .await;
 
-        provider.stop().await;
-        let restarted = FakeProvider::start(&bus, flavor, "performance").await;
-        running
-            .rendered
-            .expect(known(Profile::Performance), WITHIN)
-            .await;
+    provider.stop().await;
+    let restarted = FakeProvider::start(&bus, "performance").await;
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
 
-        // Clockwise from Performance is clamped: nothing may be requested.
-        // Stepping from the stale Power Saver would *lower* it to Balanced.
-        running.hub.request(Request::Step(1)).await.unwrap();
-        assert_eq!(restarted.profile(), "performance", "{flavor:?}");
-    }
+    // Clockwise from Performance is clamped: nothing may be requested.
+    // Stepping from the stale Power Saver would *lower* it to Balanced.
+    running.hub.request(Request::Step(1)).await.unwrap();
+    assert_eq!(restarted.profile(), "performance");
 }
 
 /// The provider starting after OpenDeck (or coming back after an outage)
 /// must be picked up within one retry interval, not after a 30 s probe.
 #[tokio::test]
 async fn recovers_within_a_retry_interval_when_the_provider_starts_late() {
-    for flavor in FLAVORS {
-        let bus = PrivateBus::start();
-        let mut running = start_hub(&bus, &["dial"]);
-        tokio::time::sleep(RETRY * 3).await;
+    let bus = PrivateBus::start();
+    let mut running = start_hub(&bus, &["dial"]);
+    tokio::time::sleep(RETRY * 3).await;
 
-        let _provider = FakeProvider::start(&bus, flavor, "balanced").await;
-        running
-            .rendered
-            .expect(known(Profile::Balanced), RETRY * 10)
-            .await;
-    }
+    let _provider = FakeProvider::start(&bus, "balanced").await;
+    running
+        .rendered
+        .expect(known(Profile::Balanced), RETRY * 10)
+        .await;
 }
 
 /// Two detents before the provider confirms the first one must still move
@@ -181,7 +172,7 @@ async fn recovers_within_a_retry_interval_when_the_provider_starts_late() {
 #[tokio::test]
 async fn quick_consecutive_detents_each_take_a_step() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "power-saver").await;
+    let provider = FakeProvider::start(&bus, "power-saver").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -204,7 +195,7 @@ async fn quick_consecutive_detents_each_take_a_step() {
 #[tokio::test]
 async fn a_quick_reversal_steps_from_the_last_request() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "power-saver").await;
+    let provider = FakeProvider::start(&bus, "power-saver").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -255,7 +246,7 @@ async fn requests_without_a_provider_are_refused() {
 #[tokio::test]
 async fn a_rejected_set_is_reported_and_changes_nothing() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -277,7 +268,7 @@ async fn a_rejected_set_is_reported_and_changes_nothing() {
 #[tokio::test]
 async fn pressing_resets_to_balanced() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "performance").await;
+    let provider = FakeProvider::start(&bus, "performance").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -297,7 +288,7 @@ async fn pressing_resets_to_balanced() {
 #[tokio::test]
 async fn a_hung_set_does_not_delay_noticing_the_provider_is_gone() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -322,7 +313,7 @@ async fn a_hung_set_does_not_delay_noticing_the_provider_is_gone() {
 #[tokio::test]
 async fn a_set_that_outlasts_the_method_timeout_fails() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     let mut running = start_hub_with(
         bus.connector_with_timeout(Duration::from_millis(300)),
         &["dial"],
@@ -364,24 +355,12 @@ async fn a_set_that_outlasts_the_method_timeout_fails() {
 }
 
 #[tokio::test]
-async fn prefers_the_upower_name_when_both_are_exported() {
-    let bus = PrivateBus::start();
-    let _legacy = FakeProvider::start(&bus, Flavor::Hadess, "power-saver").await;
-    let _current = FakeProvider::start(&bus, Flavor::UPower, "performance").await;
-    let mut running = start_hub(&bus, &["dial"]);
-    running
-        .rendered
-        .expect(known(Profile::Performance), WITHIN)
-        .await;
-}
-
-#[tokio::test]
 async fn renders_only_to_tracked_instances() {
     let bus = PrivateBus::start();
     let running_hub_instances = ["a", "b"];
     let mut running = start_hub(&bus, &running_hub_instances);
     running.hub.untrack("b");
-    let _provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let _provider = FakeProvider::start(&bus, "balanced").await;
 
     let (ids, snapshot) = running.rendered.next(WITHIN).await;
     assert_eq!(snapshot.state, known(Profile::Balanced));
@@ -391,7 +370,7 @@ async fn renders_only_to_tracked_instances() {
 #[tokio::test]
 async fn an_unchanged_profile_is_not_re_rendered() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -408,7 +387,7 @@ async fn an_unchanged_profile_is_not_re_rendered() {
 #[tokio::test]
 async fn renders_the_holder_while_a_hold_is_active() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -425,7 +404,7 @@ async fn renders_the_holder_while_a_hold_is_active() {
 #[tokio::test]
 async fn renders_a_hold_that_existed_before_connecting() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "performance").await;
+    let provider = FakeProvider::start(&bus, "performance").await;
     provider.preset_holds(&[("gamemode", "performance")]);
     let mut running = start_hub(&bus, &["dial"]);
     running
@@ -440,7 +419,7 @@ async fn renders_a_hold_that_existed_before_connecting() {
 #[tokio::test]
 async fn clears_the_holder_when_the_hold_is_released() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     provider.preset_holds(&[("gamemode", "balanced")]);
     let mut running = start_hub(&bus, &["dial"]);
     running
@@ -457,7 +436,7 @@ async fn clears_the_holder_when_the_hold_is_released() {
 #[tokio::test]
 async fn a_step_during_a_hold_still_requests_the_next_profile() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     provider.preset_holds(&[("gamemode", "balanced")]);
     let mut running = start_hub(&bus, &["dial"]);
     running
@@ -480,7 +459,7 @@ async fn a_step_during_a_hold_still_requests_the_next_profile() {
 #[tokio::test]
 async fn renders_the_degraded_reason_without_a_hold() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "performance").await;
+    let provider = FakeProvider::start(&bus, "performance").await;
     let mut running = start_hub(&bus, &["dial"]);
     running
         .rendered
@@ -499,7 +478,7 @@ async fn renders_the_degraded_reason_without_a_hold() {
 #[tokio::test]
 async fn failing_condition_reads_never_break_the_profile_display() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "power-saver").await;
+    let provider = FakeProvider::start(&bus, "power-saver").await;
     provider.fail_condition_reads();
     provider.preset_holds(&[("gamemode", "power-saver")]);
     let mut running = start_hub(&bus, &["dial"]);
@@ -514,7 +493,7 @@ async fn failing_condition_reads_never_break_the_profile_display() {
 #[tokio::test]
 async fn losing_the_provider_clears_its_holds() {
     let bus = PrivateBus::start();
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     provider.preset_holds(&[("gamemode", "balanced")]);
     let mut running = start_hub(&bus, &["dial"]);
     running
@@ -542,7 +521,7 @@ fn cooling(server: &FakeOpenLinkHub) -> Vec<Arc<dyn ProfileObserver>> {
 async fn cooling_follows_changes_but_not_connects_or_reconnects() {
     let bus = PrivateBus::start();
     let server = FakeOpenLinkHub::start(OPENLINKHUB_FIXTURE).await;
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     let mut running = start_hub_observed(bus.connector(), &["dial"], cooling(&server));
     running
         .rendered
@@ -563,7 +542,7 @@ async fn cooling_follows_changes_but_not_connects_or_reconnects() {
         .rendered
         .expect(ProfileState::Unavailable, WITHIN)
         .await;
-    let _provider = FakeProvider::start(&bus, Flavor::UPower, "power-saver").await;
+    let _provider = FakeProvider::start(&bus, "power-saver").await;
     running
         .rendered
         .expect(known(Profile::PowerSaver), WITHIN)
@@ -580,7 +559,7 @@ async fn a_hung_openlinkhub_never_delays_rendering() {
     let observers: Vec<Arc<dyn ProfileObserver>> = vec![Arc::new(CoolingSync::start(
         OpenLinkHub::new(server.addr(), Duration::from_secs(30)),
     ))];
-    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let provider = FakeProvider::start(&bus, "balanced").await;
     let mut running = start_hub_observed(bus.connector(), &["dial"], observers);
     running
         .rendered
