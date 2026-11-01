@@ -34,7 +34,8 @@ power-profiles-daemon releases that only export that one.
   from one profile to another, from the dial or from anywhere else, fan channels whose
   speed profile is `Quiet`, `Normal` or `Performance` switch to the matching one (Power
   Saver -> `Quiet`, Balanced -> `Normal`, Performance -> `Performance`). Channels on any
-  other curve are left alone, and nothing is written when the plugin starts or reconnects.
+  other curve, and pumps, are left alone; nothing is written when the plugin starts or
+  reconnects.
   It is best effort: without OpenLinkHub, or if it doesn't answer within 2 seconds, the
   dial works as before and the plugin log gets one warning. Each switch is logged as
   `cooling sync: ...`.

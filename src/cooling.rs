@@ -66,9 +66,21 @@ pub struct Channel {
     pub name: String,
 }
 
+/// Whether a channel looks like a pump (an AIO's or a custom loop's). Speed
+/// profiles carry a pump speed too, but this sync is about fans: a pump is
+/// never switched.
+fn is_pump(channel: &Value) -> bool {
+    ["name", "description", "label"].iter().any(|key| {
+        channel
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.to_ascii_lowercase().contains("pump"))
+    })
+}
+
 /// The channels of a `GET /api/` response that should switch to
-/// `fan_profile`: ones with a speed whose current profile is managed and not
-/// already `fan_profile`. Anything missing or oddly typed is skipped.
+/// `fan_profile`: fan channels with a speed whose current profile is managed
+/// and not already `fan_profile`. Anything missing or oddly typed is skipped.
 pub fn channels_to_write(api: &Value, fan_profile: &str) -> Vec<Channel> {
     let Some(devices) = api.get("device").and_then(Value::as_object) else {
         return Vec::new();
@@ -88,7 +100,12 @@ pub fn channels_to_write(api: &Value, fan_profile: &str) -> Vec<Channel> {
             let Some(channel_id) = channel.get("channelId").and_then(Value::as_i64) else {
                 continue;
             };
-            if has_speed && !is_probe && is_managed(current) && current != fan_profile {
+            if has_speed
+                && !is_probe
+                && !is_pump(channel)
+                && is_managed(current)
+                && current != fan_profile
+            {
                 channels.push(Channel {
                     device_id: device_id.clone(),
                     channel_id,
@@ -255,7 +272,9 @@ impl FailureLog {
     }
 }
 
-/// Switches the managed channels to `profile`'s fan profile.
+/// Switches the managed channels to `profile`'s fan profile. The failure log
+/// is reset only by a sync with no failure at all, so a channel that is
+/// refused every time warns once, not once per sync.
 async fn sync_once(client: &OpenLinkHub, profile: Profile, failures: &FailureLog) {
     let fan_profile = fan_profile_for(profile);
     let api = match client.devices().await {
@@ -266,21 +285,22 @@ async fn sync_once(client: &OpenLinkHub, profile: Profile, failures: &FailureLog
     if channels.is_empty() {
         log::debug!("cooling sync: no channel to switch to {fan_profile}");
     }
+    let mut clean = true;
     for channel in &channels {
         match client.set_speed(channel, fan_profile).await {
-            Ok(()) => {
-                log::info!(
-                    "cooling sync: {} channel {} ({}) -> {fan_profile}",
-                    channel.device_id,
-                    channel.channel_id,
-                    channel.name
-                );
-                failures.succeeded();
+            Ok(()) => log::info!(
+                "cooling sync: {} channel {} ({}) -> {fan_profile}",
+                channel.device_id,
+                channel.channel_id,
+                channel.name
+            ),
+            Err(e) => {
+                failures.failed(&e);
+                clean = false;
             }
-            Err(e) => failures.failed(&e),
         }
     }
-    if channels.is_empty() {
+    if clean {
         failures.succeeded();
     }
 }
@@ -380,14 +400,16 @@ mod tests {
             "2": {"channelId": 2, "profile": "Quiet", "HasSpeed": false},
             "3": {"channelId": 3, "profile": "Quiet"},
             "4": {"profile": "Quiet", "HasSpeed": true},
-            "5": {"channelId": 5, "profile": "Normal", "HasSpeed": true, "name": "Pump"}
+            "5": {"channelId": 5, "profile": "Normal", "HasSpeed": true, "name": "Rear"},
+            "6": {"channelId": 6, "profile": "Normal", "HasSpeed": true, "description": "Pump"},
+            "7": {"channelId": 7, "profile": "Normal", "HasSpeed": true, "name": "AIO pump"}
         }}}, "cluster": {"GetDevice": null}}});
         assert_eq!(
             channels_to_write(&api, "Performance"),
             vec![Channel {
                 device_id: "D".into(),
                 channel_id: 5,
-                name: "Pump".into()
+                name: "Rear".into()
             }]
         );
     }
@@ -462,6 +484,32 @@ mod tests {
             Err(CoolingError::Timeout(_))
         ));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_repeated_failure_kind_is_remembered_until_a_clean_sync() {
+        let failures = FailureLog::default();
+        let refused = CoolingError::Refused {
+            channel: "D/0".into(),
+            message: "no".into(),
+        };
+        failures.failed(&refused);
+        assert_eq!(*failures.0.lock().unwrap(), Some("refused"));
+        failures.succeeded();
+        assert_eq!(*failures.0.lock().unwrap(), None);
+    }
+
+    /// One channel refused on every sync, next to one that works: the
+    /// failure is still remembered after each sync, so it warns only once.
+    #[tokio::test]
+    async fn a_partly_refused_sync_keeps_its_failure_remembered() {
+        let server = FakeOpenLinkHub::start(FIXTURE).await;
+        server.refuse_writes();
+        let failures = FailureLog::default();
+        for profile in [Performance, Balanced] {
+            sync_once(&server.client(), profile, &failures).await;
+            assert_eq!(*failures.0.lock().unwrap(), Some("refused"));
+        }
     }
 
     #[tokio::test]
