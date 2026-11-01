@@ -388,6 +388,11 @@ impl FakeProvider {
         self.state.fail_sets.store(true, Ordering::SeqCst);
     }
 
+    /// Undoes `reject_sets`.
+    pub fn accept_sets(&self) {
+        self.state.fail_sets.store(false, Ordering::SeqCst);
+    }
+
     /// The provider process dying: its bus connection closes, so the bus
     /// drops its name and fails any call still waiting on it.
     pub async fn stop(self) {
