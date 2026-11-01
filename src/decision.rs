@@ -51,6 +51,40 @@ impl Profile {
     }
 }
 
+/// Which of the three profiles the provider offers (its `Profiles`
+/// property). Only membership comes from the provider: the dial order stays
+/// `Profile::ALL`. power-profiles-daemon leaves `performance` out on hardware
+/// without a platform-profile driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Available([bool; 3]);
+
+impl Available {
+    /// All three: what the dial assumes until (and unless) the provider says
+    /// otherwise.
+    pub const ALL: Available = Available([true; 3]);
+
+    /// The profiles among `names` (the provider's `Profile` strings; other
+    /// names are ignored). `None` when none of them is one of the three, so
+    /// the caller can fall back instead of disabling the dial.
+    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<Available> {
+        let mut offered = [false; 3];
+        for profile in names.into_iter().filter_map(Profile::from_dbus) {
+            offered[profile.position()] = true;
+        }
+        offered.contains(&true).then_some(Available(offered))
+    }
+
+    pub fn contains(self, profile: Profile) -> bool {
+        self.0[profile.position()]
+    }
+}
+
+impl Default for Available {
+    fn default() -> Self {
+        Available::ALL
+    }
+}
+
 /// What the plugin currently knows about the active profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileState {
@@ -84,22 +118,24 @@ pub struct Conditions {
     pub degraded: String,
 }
 
-/// Everything the touch strip shows: the profile state plus the conditions.
-/// Kept apart from `ProfileState`, which the stepping rules work on and which
-/// stays `Copy`.
+/// Everything the touch strip shows: the profile state, the conditions and
+/// which profiles the provider offers (for the side hints). Kept apart from
+/// `ProfileState`, which the stepping rules work on and which stays `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub state: ProfileState,
     pub conditions: Conditions,
+    pub available: Available,
 }
 
 #[cfg(test)]
 impl Snapshot {
-    /// A state with no holds and no degradation.
+    /// A state with no holds, no degradation and all three profiles offered.
     pub fn plain(state: ProfileState) -> Self {
         Self {
             state,
             conditions: Conditions::default(),
+            available: Available::ALL,
         }
     }
 }
@@ -124,30 +160,36 @@ pub enum Request {
 
 /// The profile to ask the provider for when `request` arrives in `state`, or
 /// `None` when there is nothing to request (clamped at an end, a zero-tick
-/// rotation, or no provider to talk to).
+/// rotation, no provider to talk to, or a target the provider doesn't offer).
 ///
 /// From `Unknown`, any gesture falls back to `Profile::RESET` rather than
-/// guessing a position.
-pub fn target_for(state: ProfileState, request: Request) -> Option<Profile> {
-    match (state, request) {
+/// guessing a position. A profile missing from `available` clamps like an
+/// end: a rotation never skips over it to the next one.
+pub fn target_for(state: ProfileState, request: Request, available: Available) -> Option<Profile> {
+    let target = match (state, request) {
         (ProfileState::Unavailable, _) => None,
         (_, Request::Reset) => Some(Profile::RESET),
         (ProfileState::Known(profile), Request::Step(ticks)) => profile.step(ticks),
         (ProfileState::Unknown, Request::Step(ticks)) if ticks != 0 => Some(Profile::RESET),
         (ProfileState::Unknown, Request::Step(_)) => None,
-    }
+    }?;
+    available.contains(target).then_some(target)
 }
 
 /// Whether rotating in `direction`'s sign from `state` would request anything -
 /// what the touch strip's side hints show.
-pub fn can_step(state: ProfileState, direction: i16) -> bool {
-    target_for(state, Request::Step(direction)).is_some()
+pub fn can_step(state: ProfileState, direction: i16, available: Available) -> bool {
+    target_for(state, Request::Step(direction), available).is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use Profile::*;
+
+    const ALL: Available = Available::ALL;
+    /// What power-profiles-daemon offers without a platform-profile driver.
+    const NO_PERFORMANCE: Available = Available([true, true, false]);
 
     #[test]
     fn from_dbus_finds_each_known_profile_and_round_trips() {
@@ -174,11 +216,11 @@ mod tests {
     #[test]
     fn step_moves_one_profile_either_way_from_the_middle() {
         assert_eq!(
-            target_for(ProfileState::Known(Balanced), Request::Step(1)),
+            target_for(ProfileState::Known(Balanced), Request::Step(1), ALL),
             Some(Performance)
         );
         assert_eq!(
-            target_for(ProfileState::Known(Balanced), Request::Step(-1)),
+            target_for(ProfileState::Known(Balanced), Request::Step(-1), ALL),
             Some(PowerSaver)
         );
     }
@@ -186,11 +228,11 @@ mod tests {
     #[test]
     fn step_is_clamped_at_both_ends() {
         assert_eq!(
-            target_for(ProfileState::Known(Performance), Request::Step(1)),
+            target_for(ProfileState::Known(Performance), Request::Step(1), ALL),
             None
         );
         assert_eq!(
-            target_for(ProfileState::Known(PowerSaver), Request::Step(-1)),
+            target_for(ProfileState::Known(PowerSaver), Request::Step(-1), ALL),
             None
         );
     }
@@ -199,11 +241,11 @@ mod tests {
     fn step_ignores_tick_magnitude_beyond_its_sign() {
         // A fast spin (many ticks in one event) still moves only one step.
         assert_eq!(
-            target_for(ProfileState::Known(PowerSaver), Request::Step(5)),
+            target_for(ProfileState::Known(PowerSaver), Request::Step(5), ALL),
             Some(Balanced)
         );
         assert_eq!(
-            target_for(ProfileState::Known(Performance), Request::Step(-5)),
+            target_for(ProfileState::Known(Performance), Request::Step(-5), ALL),
             Some(Balanced)
         );
     }
@@ -211,18 +253,18 @@ mod tests {
     #[test]
     fn a_zero_tick_rotation_requests_nothing() {
         for state in [ProfileState::Known(Balanced), ProfileState::Unknown] {
-            assert_eq!(target_for(state, Request::Step(0)), None);
+            assert_eq!(target_for(state, Request::Step(0), ALL), None);
         }
     }
 
     #[test]
     fn step_from_unknown_falls_back_to_the_reset_profile() {
         assert_eq!(
-            target_for(ProfileState::Unknown, Request::Step(1)),
+            target_for(ProfileState::Unknown, Request::Step(1), ALL),
             Some(Profile::RESET)
         );
         assert_eq!(
-            target_for(ProfileState::Unknown, Request::Step(-1)),
+            target_for(ProfileState::Unknown, Request::Step(-1), ALL),
             Some(Profile::RESET)
         );
     }
@@ -236,7 +278,7 @@ mod tests {
             ProfileState::Unknown,
         ] {
             assert_eq!(
-                target_for(state, Request::Reset),
+                target_for(state, Request::Reset, ALL),
                 Some(Balanced),
                 "from {state:?}"
             );
@@ -246,19 +288,85 @@ mod tests {
     #[test]
     fn nothing_is_requested_while_unavailable() {
         for request in [Request::Step(1), Request::Step(-1), Request::Reset] {
-            assert_eq!(target_for(ProfileState::Unavailable, request), None);
+            assert_eq!(target_for(ProfileState::Unavailable, request, ALL), None);
         }
     }
 
     #[test]
     fn can_step_matches_what_a_rotation_would_request() {
-        assert!(!can_step(ProfileState::Known(PowerSaver), -1));
-        assert!(can_step(ProfileState::Known(PowerSaver), 1));
-        assert!(can_step(ProfileState::Known(Performance), -1));
-        assert!(!can_step(ProfileState::Known(Performance), 1));
-        assert!(can_step(ProfileState::Unknown, -1) && can_step(ProfileState::Unknown, 1));
+        assert!(!can_step(ProfileState::Known(PowerSaver), -1, ALL));
+        assert!(can_step(ProfileState::Known(PowerSaver), 1, ALL));
+        assert!(can_step(ProfileState::Known(Performance), -1, ALL));
+        assert!(!can_step(ProfileState::Known(Performance), 1, ALL));
         assert!(
-            !can_step(ProfileState::Unavailable, -1) && !can_step(ProfileState::Unavailable, 1)
+            can_step(ProfileState::Unknown, -1, ALL) && can_step(ProfileState::Unknown, 1, ALL)
+        );
+        assert!(
+            !can_step(ProfileState::Unavailable, -1, ALL)
+                && !can_step(ProfileState::Unavailable, 1, ALL)
+        );
+    }
+
+    #[test]
+    fn available_comes_from_the_providers_names() {
+        assert_eq!(
+            Available::from_names(["power-saver", "balanced"]),
+            Some(NO_PERFORMANCE)
+        );
+        assert_eq!(
+            Available::from_names(["performance", "eco", "balanced", "power-saver"]),
+            Some(ALL)
+        );
+        assert_eq!(Available::from_names(["eco"]), None);
+        assert_eq!(Available::from_names([]), None);
+    }
+
+    #[test]
+    fn a_profile_the_provider_lacks_clamps_like_an_end() {
+        assert_eq!(
+            target_for(
+                ProfileState::Known(Balanced),
+                Request::Step(1),
+                NO_PERFORMANCE
+            ),
+            None
+        );
+        assert!(!can_step(ProfileState::Known(Balanced), 1, NO_PERFORMANCE));
+        assert!(can_step(ProfileState::Known(Balanced), -1, NO_PERFORMANCE));
+        // No skipping over a missing middle profile either.
+        let no_balanced = Available([true, false, true]);
+        assert_eq!(
+            target_for(
+                ProfileState::Known(PowerSaver),
+                Request::Step(1),
+                no_balanced
+            ),
+            None
+        );
+        assert_eq!(
+            target_for(
+                ProfileState::Known(Performance),
+                Request::Step(-1),
+                no_balanced
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn reset_requests_nothing_when_the_reset_profile_is_missing() {
+        let no_balanced = Available([true, false, true]);
+        for state in [ProfileState::Known(Performance), ProfileState::Unknown] {
+            assert_eq!(target_for(state, Request::Reset, no_balanced), None);
+            assert_eq!(target_for(state, Request::Step(-1), no_balanced), None);
+        }
+        assert_eq!(
+            target_for(
+                ProfileState::Known(Performance),
+                Request::Reset,
+                NO_PERFORMANCE
+            ),
+            Some(Balanced)
         );
     }
 }

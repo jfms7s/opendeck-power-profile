@@ -91,7 +91,8 @@ pub fn status_text(snapshot: &Snapshot) -> String {
 ///
 /// The side icons hint at what rotating does - the leaf towards Power Saver,
 /// the bolt towards Performance - and dim when rotating that way would do
-/// nothing (`decision::can_step`). Holds and degradation only add the status
+/// nothing (`decision::can_step`), including towards a profile the provider
+/// doesn't offer. Holds and degradation only add the status
 /// line; they never change the name, gauge or hints.
 pub fn feedback_for(snapshot: &Snapshot) -> Value {
     let state = snapshot.state;
@@ -109,9 +110,9 @@ pub fn feedback_for(snapshot: &Snapshot) -> Value {
     };
     json!({
         "name": name,
-        "left": icons::leaf(can_step(state, -1)),
+        "left": icons::leaf(can_step(state, -1, snapshot.available)),
         "gauge": gauge,
-        "right": icons::bolt(can_step(state, 1)),
+        "right": icons::bolt(can_step(state, 1, snapshot.available)),
         "status": status_text(snapshot),
     })
 }
@@ -119,7 +120,7 @@ pub fn feedback_for(snapshot: &Snapshot) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decision::{Conditions, Hold};
+    use crate::decision::{Available, Conditions, Hold};
     use std::collections::BTreeSet;
 
     const ALL_STATES: [ProfileState; 5] = [
@@ -145,6 +146,7 @@ mod tests {
                 holds,
                 degraded: degraded.into(),
             },
+            available: Available::ALL,
         }
     }
 
@@ -193,6 +195,16 @@ mod tests {
 
         let performance = feedback_for_state(ProfileState::Known(Profile::Performance));
         assert!(!is_dimmed(&performance["left"]) && is_dimmed(&performance["right"]));
+    }
+
+    #[test]
+    fn the_bolt_dims_when_the_provider_offers_no_performance() {
+        let snapshot = Snapshot {
+            available: Available::from_names(["power-saver", "balanced"]).unwrap(),
+            ..Snapshot::plain(ProfileState::Known(Profile::Balanced))
+        };
+        let f = feedback_for(&snapshot);
+        assert!(!is_dimmed(&f["left"]) && is_dimmed(&f["right"]));
     }
 
     #[test]

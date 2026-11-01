@@ -19,7 +19,7 @@ use thiserror::Error;
 use zbus::Connection;
 
 use crate::decision::{
-    Conditions, Profile, ProfileState, Request, Snapshot, state_for_profile, target_for,
+    Available, Conditions, Profile, ProfileState, Request, Snapshot, state_for_profile, target_for,
 };
 use crate::power_profiles::{PowerProfilesClient, PowerProfilesError, ProfileUpdate};
 
@@ -70,6 +70,9 @@ struct View {
     /// The provider's holds and degradation, rendered beside `confirmed`.
     /// Display only: the stepping rules never look at it.
     conditions: Conditions,
+    /// The profiles the provider offers, read once per connection. Rotations
+    /// clamp at the ones it doesn't.
+    available: Available,
     /// Requested but unconfirmed profiles, oldest first, each with when it
     /// was requested. Rotations step from the newest one still younger than
     /// the TTL, so detents inside one D-Bus round trip each move a profile,
@@ -87,6 +90,7 @@ impl View {
         Self {
             confirmed: ProfileState::Unavailable,
             conditions: Conditions::default(),
+            available: Available::ALL,
             in_flight: VecDeque::new(),
             ttl,
         }
@@ -142,11 +146,20 @@ impl View {
         changed
     }
 
+    /// Records which profiles the provider offers; returns whether that
+    /// differs from before (whether to render).
+    fn set_available(&mut self, available: Available) -> bool {
+        let changed = self.available != available;
+        self.available = available;
+        changed
+    }
+
     /// What the touch strip shows.
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             state: self.confirmed,
             conditions: self.conditions.clone(),
+            available: self.available,
         }
     }
 }
@@ -222,25 +235,33 @@ impl ProfileHub {
     /// Records a state the provider confirmed and renders it to every tracked
     /// instance - unless it is what they already show.
     async fn confirm(&self, state: ProfileState) {
-        self.apply(Some(state), None).await;
+        self.apply(Some(state), None, None).await;
     }
 
     /// Records the provider's holds and degradation and renders them, unless
     /// they are what the instances already show.
     async fn confirm_conditions(&self, conditions: Conditions) {
-        self.apply(None, Some(conditions)).await;
+        self.apply(None, Some(conditions), None).await;
     }
 
-    /// Records whichever of the two is given and renders once if either
+    /// Records whichever of the three is given and renders once if any
     /// changed what the strip shows.
-    async fn apply(&self, state: Option<ProfileState>, conditions: Option<Conditions>) {
+    async fn apply(
+        &self,
+        state: Option<ProfileState>,
+        conditions: Option<Conditions>,
+        available: Option<Available>,
+    ) {
         let (previous, snapshot) = {
             let mut view = lock(&self.inner.view);
             let previous = view.snapshot();
+            // Availability first, so a render shows the new state with it.
+            let available_changed =
+                available.is_some_and(|available| view.set_available(available));
             let state_changed = state.is_some_and(|state| view.confirm(state));
             let conditions_changed =
                 conditions.is_some_and(|conditions| view.set_conditions(conditions));
-            if !state_changed && !conditions_changed {
+            if !state_changed && !conditions_changed && !available_changed {
                 return;
             }
             (previous, view.snapshot())
@@ -269,8 +290,8 @@ impl ProfileHub {
         let target = {
             let mut view = lock(&self.inner.view);
             let now = Instant::now();
-            let Some(target) = target_for(view.base(now), request) else {
-                return Ok(()); // clamped, or a zero-tick rotation
+            let Some(target) = target_for(view.base(now), request, view.available) else {
+                return Ok(()); // clamped, a zero-tick rotation, or not offered
             };
             view.requested(target, now);
             target
@@ -312,9 +333,13 @@ impl ProfileHub {
                 }
             }
             self.set_client(None);
-            // Holds belong to the provider that is gone.
-            self.apply(Some(ProfileState::Unavailable), Some(Conditions::default()))
-                .await;
+            // Holds and the profile list belong to the provider that is gone.
+            self.apply(
+                Some(ProfileState::Unavailable),
+                Some(Conditions::default()),
+                Some(Available::ALL),
+            )
+            .await;
             let now = Instant::now();
             let retry_at_once =
                 lost && last_immediate.is_none_or(|at| now.duration_since(at) >= retry_interval);
@@ -353,8 +378,13 @@ impl ProfileHub {
         let mut profile_changes = Box::pin(client.profile_changes().await?);
         let seed = client.active_profile().await?;
         let conditions = client.conditions().await;
-        self.apply(Some(state_for_profile(&seed)), Some(conditions))
-            .await;
+        let available = client.available().await;
+        self.apply(
+            Some(state_for_profile(&seed)),
+            Some(conditions),
+            Some(available),
+        )
+        .await;
         self.set_client(Some(client.clone()));
 
         loop {
@@ -364,8 +394,13 @@ impl ProfileHub {
                     Some(true) => {
                         let name = client.active_profile().await?;
                         let conditions = client.conditions().await;
-                        self.apply(Some(state_for_profile(&name)), Some(conditions))
-                            .await;
+                        let available = client.available().await;
+                        self.apply(
+                            Some(state_for_profile(&name)),
+                            Some(conditions),
+                            Some(available),
+                        )
+                        .await;
                     }
                     Some(false) => return Ok("its bus name lost its owner"),
                     None => return Ok("the name-owner stream ended"),
@@ -411,7 +446,7 @@ mod tests {
 
     /// Steps the way `ProfileHub::request` does, returning the target.
     fn step(view: &mut View, ticks: i16, now: Instant) -> Profile {
-        let target = target_for(view.base(now), Request::Step(ticks)).unwrap();
+        let target = target_for(view.base(now), Request::Step(ticks), Available::ALL).unwrap();
         view.requested(target, now);
         target
     }
