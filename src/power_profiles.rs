@@ -245,6 +245,11 @@ impl PowerProfilesClient {
     /// `ActiveProfileHolds` or `PerformanceDegraded`, whether this plugin
     /// caused it or something external did (GUI applet, another key, a
     /// terminal `powerprofilesctl`, an app taking a hold).
+    ///
+    /// Subscribes to `PropertiesChanged` itself on purpose: with property
+    /// caching off (see the module doc), zbus's generated
+    /// `receive_*_changed` streams yield nothing, so swapping this for one of
+    /// them would silently stop live updates.
     pub async fn profile_changes(
         &self,
     ) -> Result<impl Stream<Item = ProfileUpdate> + 'static, PowerProfilesError> {

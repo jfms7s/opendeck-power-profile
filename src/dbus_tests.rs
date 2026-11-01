@@ -13,7 +13,7 @@ use crate::cooling::{CoolingSync, OpenLinkHub};
 use crate::decision::{Profile, ProfileState, Request};
 use crate::hub::{Connector, HubConfig, ProfileHub, ProfileObserver, RequestError};
 use crate::test_support::{
-    FakeOpenLinkHub, FakeProvider, PrivateBus, Rendered, recording_renderer,
+    FakeOpenLinkHub, FakeProvider, PrivateBus, Rendered, panic_once_renderer, recording_renderer,
 };
 
 const RETRY: Duration = Duration::from_millis(100);
@@ -845,4 +845,45 @@ async fn a_hung_openlinkhub_never_delays_rendering() {
     }
     running.hub.request(Request::Step(1)).await.unwrap();
     assert_eq!(provider.profile(), "performance");
+}
+
+/// A panic in the watch loop must not leave the dial on a profile it no
+/// longer tracks: the hub renders "Unavailable", then the restarted loop
+/// re-reads the provider.
+#[tokio::test]
+async fn a_watcher_panic_renders_unavailable_and_recovers() {
+    crate::test_support::init_test_logging();
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "balanced").await;
+    let (renderer, rendered) = panic_once_renderer(known(Profile::Performance));
+    let hub = ProfileHub::new(
+        renderer,
+        Vec::new(),
+        HubConfig {
+            retry_interval: RETRY,
+            pending_ttl: PENDING_TTL,
+        },
+    );
+    hub.track("dial");
+    let task = tokio::spawn(hub.clone().run_supervised(bus.connector()));
+    let mut running = Running {
+        hub,
+        rendered,
+        task,
+    };
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    provider.change_externally("performance").await;
+    running
+        .rendered
+        .expect(ProfileState::Unavailable, WITHIN)
+        .await;
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+    assert!(matches!(running.hub.request(Request::Reset).await, Ok(())));
 }
