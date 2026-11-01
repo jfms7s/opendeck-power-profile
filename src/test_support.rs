@@ -137,30 +137,10 @@ impl Drop for PrivateBus {
     }
 }
 
-/// Which D-Bus name a fake provider exports.
-#[derive(Debug, Clone, Copy)]
-pub enum Flavor {
-    /// The current name, exported by power-profiles-daemon >= 0.20 and tuned-ppd.
-    UPower,
-    /// The legacy name, the only one older power-profiles-daemon exports.
-    Hadess,
-}
-
-impl Flavor {
-    fn name(self) -> &'static str {
-        match self {
-            Flavor::UPower => "org.freedesktop.UPower.PowerProfiles",
-            Flavor::Hadess => "net.hadess.PowerProfiles",
-        }
-    }
-
-    fn path(self) -> &'static str {
-        match self {
-            Flavor::UPower => "/org/freedesktop/UPower/PowerProfiles",
-            Flavor::Hadess => "/net/hadess/PowerProfiles",
-        }
-    }
-}
+/// The bus name and object path a fake provider exports, as power-profiles-daemon
+/// >= 0.20 and tuned-ppd do.
+const PROVIDER_NAME: &str = "org.freedesktop.UPower.PowerProfiles";
+const PROVIDER_PATH: &str = "/org/freedesktop/UPower/PowerProfiles";
 
 /// A fake hold: `(ApplicationId, Profile)`.
 pub type FakeHold = (String, String);
@@ -179,7 +159,6 @@ struct FakeState {
     set_delay: Mutex<Duration>,
     fail_sets: AtomicBool,
     conn: OnceLock<Connection>,
-    flavor: OnceLock<Flavor>,
 }
 
 fn holds_value(holds: &[FakeHold]) -> Vec<HashMap<String, OwnedValue>> {
@@ -205,11 +184,10 @@ fn holds_value(holds: &[FakeHold]) -> Vec<HashMap<String, OwnedValue>> {
 }
 
 async fn emit_changed(state: &FakeState, changed: HashMap<&str, Value<'_>>) {
-    let flavor = *state.flavor.get().unwrap();
-    let emitter = SignalEmitter::new(state.conn.get().unwrap(), flavor.path()).unwrap();
+    let emitter = SignalEmitter::new(state.conn.get().unwrap(), PROVIDER_PATH).unwrap();
     zbus::fdo::Properties::properties_changed(
         &emitter,
-        InterfaceName::try_from(flavor.name()).unwrap(),
+        InterfaceName::try_from(PROVIDER_NAME).unwrap(),
         changed,
         Cow::Borrowed(&[]),
     )
@@ -257,47 +235,40 @@ async fn handle_set(state: &Arc<FakeState>, value: String) -> zbus::fdo::Result<
     Ok(())
 }
 
-macro_rules! fake_interface {
-    ($ty:ident, $iface:tt) => {
-        struct $ty(Arc<FakeState>);
+struct FakePowerProfiles(Arc<FakeState>);
 
-        #[zbus::interface(name = $iface)]
-        impl $ty {
-            #[zbus(property(emits_changed_signal = "false"))]
-            fn active_profile(&self) -> String {
-                self.0.profile.lock().unwrap().clone()
-            }
+#[zbus::interface(name = "org.freedesktop.UPower.PowerProfiles")]
+impl FakePowerProfiles {
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn active_profile(&self) -> String {
+        self.0.profile.lock().unwrap().clone()
+    }
 
-            #[zbus(property)]
-            async fn set_active_profile(&mut self, value: String) -> zbus::fdo::Result<()> {
-                handle_set(&self.0, value).await
-            }
+    #[zbus(property)]
+    async fn set_active_profile(&mut self, value: String) -> zbus::fdo::Result<()> {
+        handle_set(&self.0, value).await
+    }
 
-            #[zbus(property(emits_changed_signal = "false"))]
-            fn active_profile_holds(&self) -> zbus::fdo::Result<Vec<HashMap<String, OwnedValue>>> {
-                if self.0.fail_condition_reads.load(Ordering::SeqCst) {
-                    return Err(zbus::fdo::Error::UnknownProperty(
-                        "ActiveProfileHolds".into(),
-                    ));
-                }
-                Ok(holds_value(&self.0.holds.lock().unwrap()))
-            }
-
-            #[zbus(property(emits_changed_signal = "false"))]
-            fn performance_degraded(&self) -> zbus::fdo::Result<String> {
-                if self.0.fail_condition_reads.load(Ordering::SeqCst) {
-                    return Err(zbus::fdo::Error::UnknownProperty(
-                        "PerformanceDegraded".into(),
-                    ));
-                }
-                Ok(self.0.degraded.lock().unwrap().clone())
-            }
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn active_profile_holds(&self) -> zbus::fdo::Result<Vec<HashMap<String, OwnedValue>>> {
+        if self.0.fail_condition_reads.load(Ordering::SeqCst) {
+            return Err(zbus::fdo::Error::UnknownProperty(
+                "ActiveProfileHolds".into(),
+            ));
         }
-    };
-}
+        Ok(holds_value(&self.0.holds.lock().unwrap()))
+    }
 
-fake_interface!(FakeUPower, "org.freedesktop.UPower.PowerProfiles");
-fake_interface!(FakeHadess, "net.hadess.PowerProfiles");
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn performance_degraded(&self) -> zbus::fdo::Result<String> {
+        if self.0.fail_condition_reads.load(Ordering::SeqCst) {
+            return Err(zbus::fdo::Error::UnknownProperty(
+                "PerformanceDegraded".into(),
+            ));
+        }
+        Ok(self.0.degraded.lock().unwrap().clone())
+    }
+}
 
 /// A fake power-profiles-daemon / tuned-ppd on a private bus.
 pub struct FakeProvider {
@@ -305,17 +276,18 @@ pub struct FakeProvider {
 }
 
 impl FakeProvider {
-    pub async fn start(bus: &PrivateBus, flavor: Flavor, profile: &str) -> Self {
+    pub async fn start(bus: &PrivateBus, profile: &str) -> Self {
         let state = Arc::new(FakeState::default());
         *state.profile.lock().unwrap() = profile.to_string();
-        state.flavor.set(flavor).unwrap();
-        let builder = zbus::connection::Builder::address(bus.address.as_str()).unwrap();
-        let builder = match flavor {
-            Flavor::UPower => builder.serve_at(flavor.path(), FakeUPower(state.clone())),
-            Flavor::Hadess => builder.serve_at(flavor.path(), FakeHadess(state.clone())),
-        }
-        .unwrap();
-        let conn = builder.name(flavor.name()).unwrap().build().await.unwrap();
+        let conn = zbus::connection::Builder::address(bus.address.as_str())
+            .unwrap()
+            .serve_at(PROVIDER_PATH, FakePowerProfiles(state.clone()))
+            .unwrap()
+            .name(PROVIDER_NAME)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
         state.conn.set(conn).unwrap();
         Self { state }
     }

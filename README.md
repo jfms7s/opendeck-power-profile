@@ -9,8 +9,7 @@ It talks to whatever provides the `PowerProfiles` D-Bus interface on the system 
 [power-profiles-daemon](https://gitlab.freedesktop.org/upower/power-profiles-daemon) or
 [tuned-ppd](https://github.com/redhat-performance/tuned) (Fedora's default, which maps the
 three profiles onto TuneD profiles). It uses the `org.freedesktop.UPower.PowerProfiles` bus
-name and falls back to the legacy `net.hadess.PowerProfiles` name for older
-power-profiles-daemon releases that only export that one.
+name, which tuned-ppd and power-profiles-daemon 0.20 and later export.
 
 ## Using the dial
 
