@@ -74,6 +74,9 @@ jobs:
         with:
           node-version: 24
       - run: node build.mjs --release x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+      # The Release workflow builds the draft's notes from the README's smoke
+      # checklist markers; catch a broken marker here, not on a pushed tag.
+      - run: node scripts/release-body.mjs > /dev/null
 
   msrv:
     runs-on: ubuntu-24.04
