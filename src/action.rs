@@ -1,7 +1,9 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use crate::decision::{Request, Snapshot};
-use crate::format::feedback_for;
+use crate::decision::{Request, Snapshot, is_long_press};
+use crate::format::{feedback_for, tile_image_for, title_for};
 use crate::hub::{ProfileHub, Renderer, RequestError};
 use crate::instances::Instances;
 use async_trait::async_trait;
@@ -15,9 +17,18 @@ use serde::{Deserialize, Serialize};
 pub struct PowerProfileSettings {}
 
 /// Draws `snapshot` on one instance. The only place anything is drawn: the
-/// renderer calls it for every change, `will_appear` for a new instance.
+/// renderer calls it for every change, `will_appear` for a new instance. A
+/// dial gets the touch-strip layout; a key gets the profile's glyph as its
+/// image and the profile's name as its title.
 async fn draw(instance: &Instance, snapshot: &Snapshot) -> OpenActionResult<()> {
-    instance.set_feedback(&feedback_for(snapshot)).await
+    if instance.controller == "Keypad" {
+        instance
+            .set_image(Some(tile_image_for(snapshot)), None)
+            .await?;
+        instance.set_title(Some(title_for(snapshot)), None).await
+    } else {
+        instance.set_feedback(&feedback_for(snapshot)).await
+    }
 }
 
 /// Renders hub state changes onto every tracked OpenDeck instance.
@@ -45,15 +56,29 @@ impl Renderer for OpenDeckRenderer {
     }
 }
 
-/// The "Power Profile" dial: translates OpenDeck events into hub calls.
+/// The "Power Profile" action, on a dial or a key: translates OpenDeck
+/// events into hub calls.
 pub struct PowerProfileAction {
     hub: ProfileHub,
     instances: Arc<Instances>,
+    /// When each key instance went down, to tell a press from a long press
+    /// on release.
+    key_downs: Mutex<HashMap<String, Instant>>,
 }
 
 impl PowerProfileAction {
     pub fn new(hub: ProfileHub, instances: Arc<Instances>) -> Self {
-        Self { hub, instances }
+        Self {
+            hub,
+            instances,
+            key_downs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn key_downs(&self) -> std::sync::MutexGuard<'_, HashMap<String, Instant>> {
+        self.key_downs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     async fn request(&self, instance: &Instance, request: Request) -> OpenActionResult<()> {
@@ -91,7 +116,33 @@ impl Action for PowerProfileAction {
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
         self.instances.untrack(&instance.instance_id);
+        self.key_downs().remove(&instance.instance_id);
         Ok(())
+    }
+
+    async fn key_down(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
+        self.key_downs()
+            .insert(instance.instance_id.clone(), Instant::now());
+        Ok(())
+    }
+
+    /// A press cycles to the next profile; a long press resets to Balanced.
+    /// A release without a recorded key-down counts as a press.
+    async fn key_up(
+        &self,
+        instance: &Instance,
+        _settings: &Self::Settings,
+    ) -> OpenActionResult<()> {
+        let pressed_at = self.key_downs().remove(&instance.instance_id);
+        let request = match pressed_at {
+            Some(at) if is_long_press(at.elapsed()) => Request::Reset,
+            _ => Request::Cycle,
+        };
+        self.request(instance, request).await
     }
 
     async fn dial_rotate(
@@ -141,6 +192,14 @@ mod tests {
         assert!(
             layout_id.starts_with(&format!("{plugin_uuid}.")),
             "{layout_id}"
+        );
+    }
+
+    #[test]
+    fn the_action_is_offered_on_dials_and_keys() {
+        assert_eq!(
+            manifest()["Actions"][0]["Controllers"],
+            serde_json::json!(["Encoder", "Keypad"])
         );
     }
 

@@ -347,6 +347,28 @@ async fn quick_consecutive_detents_each_take_a_step() {
         .await;
 }
 
+/// Two key presses before the provider confirms the first one cycle twice
+/// from the pending profile: Performance wraps to Power Saver, then Balanced.
+#[tokio::test]
+async fn quick_presses_cycle_from_the_pending_profile() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "performance").await;
+    let mut running = start_hub(&bus, &["key"]);
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+
+    provider.delay_signals_by(Duration::from_millis(500));
+    running.hub.request(Request::Cycle).await.unwrap();
+    running.hub.request(Request::Cycle).await.unwrap();
+    assert_eq!(provider.profile(), "balanced");
+    running
+        .rendered
+        .expect_settled(known(Profile::Balanced), WITHIN)
+        .await;
+}
+
 /// Forward, forward, back - with the first step confirmed before the reversal
 /// but the second not yet - must land one below the *last request*
 /// (Performance - 1 = Balanced), not one below the confirmed profile.
