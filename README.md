@@ -100,6 +100,11 @@ to require every architecture in the manifest's `CodePaths` and also write
    with the bundle and `SHA256SUMS` attached.
 3. Install the drafted bundle, run the smoke-test checklist, then publish the draft.
    Ansible installs the latest *published* release, so publishing is what deploys it.
+   Releases are immutable once published (GitHub's immutable releases setting, on for
+   this repository): the assets and the tag are frozen, so a broken release is fixed with
+   a new version, never by replacing an asset. Before publishing, check that
+   `gh api repos/jfms7s/opendeck-power-profile/immutable-releases` still reports
+   `"enabled":true`; a release published while it is off stays mutable.
 
 ## License
 
