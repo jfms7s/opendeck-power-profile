@@ -488,6 +488,35 @@ impl Renderer for RecordingRenderer {
     }
 }
 
+/// Records like `RecordingRenderer`, but panics instead, once, the first
+/// time it is asked to render `panic_on`: a stand-in for a bug that kills
+/// the watch loop.
+pub struct PanicOnceRenderer {
+    recording: RecordingRenderer,
+    panic_on: ProfileState,
+    panicked: AtomicBool,
+}
+
+#[async_trait]
+impl Renderer for PanicOnceRenderer {
+    async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot) {
+        if snapshot.state == self.panic_on && !self.panicked.swap(true, Ordering::SeqCst) {
+            panic!("test renderer: deliberate panic on {:?}", self.panic_on);
+        }
+        self.recording.render_all(instance_ids, snapshot).await;
+    }
+}
+
+pub fn panic_once_renderer(panic_on: ProfileState) -> (Arc<PanicOnceRenderer>, Rendered) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let renderer = PanicOnceRenderer {
+        recording: RecordingRenderer(tx),
+        panic_on,
+        panicked: AtomicBool::new(false),
+    };
+    (Arc::new(renderer), Rendered(rx))
+}
+
 pub struct Rendered(mpsc::UnboundedReceiver<(Vec<String>, Snapshot)>);
 
 pub fn recording_renderer() -> (Arc<RecordingRenderer>, Rendered) {

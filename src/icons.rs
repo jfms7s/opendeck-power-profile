@@ -2,11 +2,11 @@
 //! dial layouts: white 2px round-cap strokes on a 24x24 grid. OpenDeck's
 //! strip renderer (resvg) accepts an SVG string directly as a pixmap value.
 
-pub(crate) const WHITE: &str = "#ffffff";
+pub const WHITE: &str = "#ffffff";
 
 /// Stroke opacity for a side icon whose direction is blocked (the dial is
 /// already clamped at that end).
-pub(crate) const DIMMED_OPACITY: f64 = 0.3;
+pub const DIMMED_OPACITY: f64 = 0.3;
 
 /// The gauge needle pivots on this point and is this long.
 const NEEDLE_HUB: (f64, f64) = (12.0, 16.0);

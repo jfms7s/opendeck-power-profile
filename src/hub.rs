@@ -351,6 +351,28 @@ impl ProfileHub {
         }
     }
 
+    /// Runs the watch loop forever, restarting it if it ever panics (`run`
+    /// itself never returns). A restart first resets what the dead loop left
+    /// behind - its client, the in-flight requests, the provider's conditions
+    /// and profile list - and renders "Unavailable", as a lost provider does.
+    pub async fn run_supervised(self, connector: Connector) {
+        loop {
+            let watcher = tokio::spawn(self.clone().run(connector.clone()));
+            if let Err(e) = watcher.await {
+                log::error!("power profile watcher stopped ({e}); restarting it");
+            }
+            self.set_client(None);
+            // Confirming Unavailable also drops every in-flight request.
+            self.apply(
+                Some(ProfileState::Unavailable),
+                Some(Conditions::default()),
+                Some(Available::ALL),
+            )
+            .await;
+            tokio::time::sleep(self.inner.config.retry_interval).await;
+        }
+    }
+
     /// One connect-and-follow cycle; returns when the provider is unreachable or lost.
     async fn session(&self, connector: &Connector) -> SessionEnd {
         let connected = async {

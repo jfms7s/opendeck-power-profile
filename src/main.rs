@@ -64,7 +64,7 @@ async fn main() -> OpenActionResult<()> {
                 .await
         })
     });
-    tokio::spawn(supervise(hub.clone(), connector));
+    tokio::spawn(hub.clone().run_supervised(connector));
 
     register_action(PowerProfileAction::new(hub)).await;
     run(std::env::args().collect()).await
@@ -87,19 +87,6 @@ fn log_filters() -> [(log::LevelFilter, simplelog::Config); 2] {
         (log::LevelFilter::Info, everything_but_zbus),
         (log::LevelFilter::Warn, zbus),
     ]
-}
-
-/// Keeps the watch loop alive: `ProfileHub::run` never returns, so the only
-/// way it ends is a panic - log it and start a fresh one rather than leave
-/// the dial frozen on its last state.
-async fn supervise(hub: ProfileHub, connector: Connector) {
-    loop {
-        let watcher = tokio::spawn(hub.clone().run(connector.clone()));
-        if let Err(e) = watcher.await {
-            log::error!("power profile watcher stopped ({e}); restarting it");
-        }
-        tokio::time::sleep(RETRY_INTERVAL).await;
-    }
 }
 
 #[cfg(test)]
