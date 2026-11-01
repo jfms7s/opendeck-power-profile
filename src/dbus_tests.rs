@@ -130,7 +130,7 @@ async fn renders_external_changes() {
     provider.change_externally("performance").await;
     running
         .rendered
-        .expect(known(Profile::Performance), WITHIN)
+        .expect_settled(known(Profile::Performance), WITHIN)
         .await;
 }
 
@@ -298,18 +298,27 @@ async fn reconnects_at_once_after_losing_the_provider() {
 }
 
 /// The provider starting after OpenDeck (or coming back after an outage)
-/// must be picked up within one retry interval, not after a 30 s probe.
+/// must be picked up within one retry interval, not after a 30 s probe: at
+/// most one retry sleep plus a connect, so within `RETRY * 2` of it starting.
+/// `RETRY * 10` only stops a hung hub from hanging the test.
 #[tokio::test]
 async fn recovers_within_a_retry_interval_when_the_provider_starts_late() {
     let bus = PrivateBus::start();
     let mut running = start_hub(&bus, &["dial"]);
-    tokio::time::sleep(RETRY * 3).await;
+    // Mid-way between two attempts, after the first one failed.
+    tokio::time::sleep(RETRY + RETRY / 2).await;
 
     let _provider = FakeProvider::start(&bus, "balanced").await;
+    let started = tokio::time::Instant::now();
     running
         .rendered
         .expect(known(Profile::Balanced), RETRY * 10)
         .await;
+    assert!(
+        started.elapsed() <= RETRY * 2,
+        "recovered after {:?}",
+        started.elapsed()
+    );
 }
 
 /// Two detents before the provider confirms the first one must still move
@@ -330,7 +339,7 @@ async fn quick_consecutive_detents_each_take_a_step() {
     assert_eq!(provider.profile(), "performance");
     running
         .rendered
-        .expect(known(Profile::Performance), WITHIN)
+        .expect_settled(known(Profile::Performance), WITHIN)
         .await;
 }
 
@@ -380,6 +389,31 @@ async fn requests_without_a_provider_are_refused() {
     let bus = PrivateBus::start();
     let running = start_hub(&bus, &["dial"]);
     tokio::time::sleep(RETRY * 2).await;
+    for request in [Request::Step(1), Request::Reset] {
+        assert!(matches!(
+            running.hub.request(request).await,
+            Err(RequestError::NotConnected)
+        ));
+    }
+}
+
+/// After a loss the hub must drop the dead client, so a detent is refused
+/// (and alerts) rather than quietly doing nothing.
+#[tokio::test]
+async fn requests_after_losing_the_provider_are_refused() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "balanced").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    provider.stop().await;
+    running
+        .rendered
+        .expect(ProfileState::Unavailable, WITHIN)
+        .await;
     for request in [Request::Step(1), Request::Reset] {
         assert!(matches!(
             running.hub.request(request).await,
@@ -511,7 +545,7 @@ async fn pressing_resets_to_balanced() {
     assert_eq!(provider.profile(), "balanced");
     running
         .rendered
-        .expect(known(Profile::Balanced), WITHIN)
+        .expect_settled(known(Profile::Balanced), WITHIN)
         .await;
 }
 

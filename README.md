@@ -85,6 +85,8 @@ link.
 - [ ] Two clockwise detents from Power Saver, clicked separately in quick succession, land
       on Performance.
 - [ ] Pressing the dial from any profile jumps straight to Balanced.
+- [ ] Pressing the dial while already at Balanced changes nothing visible and adds no
+      `[WARN]` to the plugin log.
 - [ ] Changing the profile from outside updates the dial's touch strip immediately,
       without touching the dial: use the desktop's power applet, `powerprofilesctl set
       performance`, or (with no `powerprofilesctl`, as with tuned-ppd)
@@ -118,13 +120,16 @@ link.
 ## Development
 
 The tests start their own private `dbus-daemon` (package `dbus-daemon` or `dbus`), so they
-need that binary installed but never touch the system bus or the active profile. These are
-the commands CI runs:
+need that binary installed but never touch the system bus or the active profile. CI's `test`
+job runs the first three lines (the tests under coverage); CI also runs the MSRV check and
+the advisory scan below. The rest is the local install loop:
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
+# cargo +1.89 check --all-targets --locked   # MSRV (CI's msrv job)
+# cargo deny check advisories                # needs cargo-deny (CI's advisories workflow)
 cargo build --release --locked
 node build.mjs                               # assembles dist/<uuid>.sdPlugin for this host
 cp -r dist/com.jfms7s.powerprofile.sdPlugin ~/.config/opendeck/plugins/
