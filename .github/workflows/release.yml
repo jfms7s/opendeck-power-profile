@@ -1,6 +1,6 @@
 name: Release
 # Push a tag `v<version>` matching Cargo.toml and assets/manifest.json. This
-# re-runs the checks, builds both architectures, packages the bundle with a
+# re-runs the checks, builds the x86_64 Linux binary, packages the bundle with a
 # SHA256SUMS file, and creates a *draft* release with both attached - so no
 # release is ever visible without its asset. The draft's notes start with the
 # README's smoke-test checklist, unticked (scripts/release-body.mjs). Run that
@@ -52,19 +52,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
-      - name: Install cross-compilation linker (aarch64)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          targets: x86_64-unknown-linux-gnu
       - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
-      - run: cargo build --release --locked --target aarch64-unknown-linux-gnu
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
       - name: Package (fails unless the tag is v<Cargo/manifest version>)
-        run: node build.mjs --release --tag "$GITHUB_REF_NAME" x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+        run: node build.mjs --release --tag "$GITHUB_REF_NAME" x86_64-unknown-linux-gnu
       # Written after build.mjs has zipped the bundle and written SHA256SUMS,
       # so it is in neither; it only becomes the draft's notes.
       - name: Write the draft's notes (the README smoke checklist, unticked)

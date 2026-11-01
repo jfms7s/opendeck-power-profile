@@ -139,8 +139,8 @@ to require every architecture in the manifest's `CodePaths` and also write
 
 1. Bump the version in `Cargo.toml` and `assets/manifest.json` together (a unit test fails
    if they differ) and merge that to `master`.
-2. Push a tag `v<version>`. The Release workflow re-runs the checks, builds x86_64 and
-   aarch64, refuses a tag that doesn't match the version, and creates a **draft** release
+2. Push a tag `v<version>`. The Release workflow re-runs the checks, builds the x86_64
+   Linux binary (the only one the bundle ships), refuses a tag that doesn't match the version, and creates a **draft** release
    with the bundle and `SHA256SUMS` attached. The draft's notes start with the smoke-test
    checklist above, unticked (`scripts/release-body.mjs`), followed by the generated
    change list.
