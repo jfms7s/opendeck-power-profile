@@ -26,6 +26,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy, llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install dbus-daemon (the D-Bus tests run a private bus)
         run: command -v dbus-daemon || { sudo apt-get update && sudo apt-get install -y dbus-daemon; }
       - run: cargo fmt --check
@@ -49,10 +50,14 @@ jobs:
           include-hidden-files: true
           retention-days: 7
 
-  # Builds and packages exactly as release.yml does, so a packaging break shows
-  # up on the pull request rather than when a tag is pushed.
+  # Builds and packages the way release.yml does, so a packaging break shows up
+  # on the pull request rather than when a tag is pushed - but without LTO,
+  # which only the release builds (never cached) pay for.
   package:
     runs-on: ubuntu-24.04
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     permissions:
       contents: read
     steps:
@@ -63,6 +68,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -83,6 +89,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
         with:
           toolchain: ${{ env.RUST_MSRV }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --all-targets --locked
 
   # eng-metrics-lab (report-only): duplication, complexity and dead code; the collector picks up the artifact.
