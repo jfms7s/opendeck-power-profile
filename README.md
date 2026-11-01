@@ -14,10 +14,11 @@ name, which tuned-ppd and power-profiles-daemon 0.20 and later export.
 ## Using the dial
 
 - **Rotate** to step one profile at a time (Power Saver -> Balanced -> Performance),
-  clamped at both ends - it won't wrap around. Each detent is one step, even when you turn
-  faster than the provider confirms the previous one.
+  clamped at both ends - it won't wrap around. Each rotation event is one step: separate
+  detents are never lost, even when you turn faster than the provider confirms the previous
+  one, but a fast spin that arrives as one multi-detent event still moves only one profile.
 - **Press** to jump straight to Balanced, regardless of the current profile.
-- Profiles the provider doesn't offer are skipped by clamping: power-profiles-daemon leaves
+- The dial stops short of a profile the provider doesn't offer: power-profiles-daemon leaves
   Performance out on hardware without a platform-profile driver, and then the dial stops at
   Balanced (its bolt hint dims) instead of asking for a profile the provider would refuse.
   The plugin reads the provider's profile list once per connection.
@@ -81,7 +82,8 @@ link.
       further clockwise stays at Performance (no wraparound).
 - [ ] Rotating counter-clockwise from Performance moves to Balanced, then Power Saver;
       rotating further counter-clockwise stays at Power Saver (no wraparound).
-- [ ] Two quick clockwise detents from Power Saver land on Performance.
+- [ ] Two clockwise detents from Power Saver, clicked separately in quick succession, land
+      on Performance.
 - [ ] Pressing the dial from any profile jumps straight to Balanced.
 - [ ] Changing the profile from outside updates the dial's touch strip immediately,
       without touching the dial: use the desktop's power applet, `powerprofilesctl set
