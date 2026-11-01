@@ -25,6 +25,7 @@ use zbus::{OwnedVariant, Variant};
 
 use crate::decision::{ProfileState, Snapshot};
 use crate::hub::{Connector, Renderer};
+use crate::instances::Instances;
 
 /// Sends `log` records to stderr, which the test harness captures per test
 /// and shows only for failures.
@@ -477,12 +478,16 @@ impl FakeProvider {
 }
 
 /// A renderer that records every snapshot the hub pushes.
-pub struct RecordingRenderer(mpsc::UnboundedSender<(Vec<String>, Snapshot)>);
+/// Records every render with the instance IDs tracked at that moment.
+pub struct RecordingRenderer {
+    instances: Arc<Instances>,
+    tx: mpsc::UnboundedSender<(Vec<String>, Snapshot)>,
+}
 
 #[async_trait]
 impl Renderer for RecordingRenderer {
-    async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot) {
-        let _ = self.0.send((instance_ids.to_vec(), snapshot.clone()));
+    async fn render(&self, snapshot: &Snapshot) {
+        let _ = self.tx.send((self.instances.ids(), snapshot.clone()));
     }
 }
 
@@ -497,18 +502,21 @@ pub struct PanicOnceRenderer {
 
 #[async_trait]
 impl Renderer for PanicOnceRenderer {
-    async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot) {
+    async fn render(&self, snapshot: &Snapshot) {
         if snapshot.state == self.panic_on && !self.panicked.swap(true, Ordering::SeqCst) {
             panic!("test renderer: deliberate panic on {:?}", self.panic_on);
         }
-        self.recording.render_all(instance_ids, snapshot).await;
+        self.recording.render(snapshot).await;
     }
 }
 
-pub fn panic_once_renderer(panic_on: ProfileState) -> (Arc<PanicOnceRenderer>, Rendered) {
+pub fn panic_once_renderer(
+    instances: Arc<Instances>,
+    panic_on: ProfileState,
+) -> (Arc<PanicOnceRenderer>, Rendered) {
     let (tx, rx) = mpsc::unbounded_channel();
     let renderer = PanicOnceRenderer {
-        recording: RecordingRenderer(tx),
+        recording: RecordingRenderer { instances, tx },
         panic_on,
         panicked: AtomicBool::new(false),
     };
@@ -517,9 +525,9 @@ pub fn panic_once_renderer(panic_on: ProfileState) -> (Arc<PanicOnceRenderer>, R
 
 pub struct Rendered(mpsc::UnboundedReceiver<(Vec<String>, Snapshot)>);
 
-pub fn recording_renderer() -> (Arc<RecordingRenderer>, Rendered) {
+pub fn recording_renderer(instances: Arc<Instances>) -> (Arc<RecordingRenderer>, Rendered) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (Arc::new(RecordingRenderer(tx)), Rendered(rx))
+    (Arc::new(RecordingRenderer { instances, tx }), Rendered(rx))
 }
 
 /// How long `Rendered::expect_settled` watches for a stray render.

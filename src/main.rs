@@ -6,6 +6,7 @@ mod decision;
 mod format;
 mod hub;
 mod icons;
+mod instances;
 mod power_profiles;
 #[cfg(test)]
 mod test_support;
@@ -16,6 +17,7 @@ use std::time::Duration;
 use action::{OpenDeckRenderer, PowerProfileAction};
 use cooling::{CoolingSync, OPENLINKHUB_ADDR, OpenLinkHub, REQUEST_TIMEOUT};
 use hub::{Connector, HubConfig, ProfileHub};
+use instances::Instances;
 use openaction::{OpenActionResult, register_action, run};
 
 /// How long to wait before reconnecting after the provider is lost or a
@@ -48,8 +50,9 @@ async fn main() -> OpenActionResult<()> {
 
     // Switches OpenLinkHub's fan channels along with the profile, when it runs.
     let cooling = CoolingSync::start(OpenLinkHub::new(OPENLINKHUB_ADDR, REQUEST_TIMEOUT));
+    let instances = Arc::new(Instances::default());
     let hub = ProfileHub::new(
-        Arc::new(OpenDeckRenderer),
+        Arc::new(OpenDeckRenderer::new(instances.clone())),
         vec![Arc::new(cooling)],
         HubConfig {
             retry_interval: RETRY_INTERVAL,
@@ -66,7 +69,7 @@ async fn main() -> OpenActionResult<()> {
     });
     tokio::spawn(hub.clone().run_supervised(connector));
 
-    register_action(PowerProfileAction::new(hub)).await;
+    register_action(PowerProfileAction::new(hub, instances)).await;
     run(std::env::args().collect()).await
 }
 
