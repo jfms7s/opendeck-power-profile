@@ -21,7 +21,7 @@ use zbus::Connection;
 use zbus::fdo::RequestNameFlags;
 use zbus::names::InterfaceName;
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant, Variant};
 
 use crate::decision::{ProfileState, Snapshot};
 use crate::hub::{Connector, Renderer};
@@ -143,7 +143,7 @@ impl PrivateBus {
             let address = address.clone();
             let configure = configure.clone();
             Box::pin(async move {
-                configure(zbus::connection::Builder::address(address.as_str())?)
+                configure(zbus::connection::Builder::address(address.as_str()))
                     .build()
                     .await
             })
@@ -210,35 +210,35 @@ struct FakeState {
     conn: OnceLock<Connection>,
 }
 
-fn holds_value(holds: &[FakeHold]) -> Vec<HashMap<String, OwnedValue>> {
+fn holds_value(holds: &[FakeHold]) -> Vec<HashMap<String, OwnedVariant>> {
     holds
         .iter()
         .map(|(application_id, profile)| {
             HashMap::from([
                 (
                     "ApplicationId".to_string(),
-                    OwnedValue::from(zbus::zvariant::Str::from(application_id.clone())),
+                    OwnedVariant::from(zbus::Str::from(application_id.clone())),
                 ),
                 (
                     "Profile".to_string(),
-                    OwnedValue::from(zbus::zvariant::Str::from(profile.clone())),
+                    OwnedVariant::from(zbus::Str::from(profile.clone())),
                 ),
                 (
                     "Reason".to_string(),
-                    OwnedValue::from(zbus::zvariant::Str::from("test")),
+                    OwnedVariant::from(zbus::Str::from("test")),
                 ),
             ])
         })
         .collect()
 }
 
-async fn emit_changed(state: &FakeState, changed: HashMap<&str, Value<'_>>) {
+async fn emit_changed(state: &FakeState, changed: HashMap<&str, Variant<'_>>) {
     emit_properties_changed(state, changed, &[]).await;
 }
 
 async fn emit_properties_changed(
     state: &FakeState,
-    changed: HashMap<&str, Value<'_>>,
+    changed: HashMap<&str, Variant<'_>>,
     invalidated: &[&str],
 ) {
     let emitter = SignalEmitter::new(state.conn.get().unwrap(), PROVIDER_PATH).unwrap();
@@ -255,7 +255,7 @@ async fn emit_properties_changed(
 async fn announce(state: &FakeState, profile: &str) {
     emit_changed(
         state,
-        HashMap::from([("ActiveProfile", Value::from(profile))]),
+        HashMap::from([("ActiveProfile", Variant::from(profile))]),
     )
     .await;
 }
@@ -264,7 +264,7 @@ async fn announce_holds(state: &FakeState) {
     let holds = holds_value(&state.holds.lock().unwrap());
     emit_changed(
         state,
-        HashMap::from([("ActiveProfileHolds", Value::from(holds))]),
+        HashMap::from([("ActiveProfileHolds", Variant::from(holds))]),
     )
     .await;
 }
@@ -307,7 +307,7 @@ impl FakePowerProfiles {
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
-    fn active_profile_holds(&self) -> zbus::fdo::Result<Vec<HashMap<String, OwnedValue>>> {
+    fn active_profile_holds(&self) -> zbus::fdo::Result<Vec<HashMap<String, OwnedVariant>>> {
         if self.0.fail_condition_reads.load(Ordering::SeqCst) {
             return Err(zbus::fdo::Error::UnknownProperty(
                 "ActiveProfileHolds".into(),
@@ -327,7 +327,7 @@ impl FakePowerProfiles {
     }
 
     #[zbus(property(emits_changed_signal = "false"))]
-    fn profiles(&self) -> Vec<HashMap<String, OwnedValue>> {
+    fn profiles(&self) -> Vec<HashMap<String, OwnedVariant>> {
         self.0
             .profiles
             .lock()
@@ -337,11 +337,11 @@ impl FakePowerProfiles {
                 HashMap::from([
                     (
                         "Profile".to_string(),
-                        OwnedValue::from(zbus::zvariant::Str::from(name.clone())),
+                        OwnedVariant::from(zbus::Str::from(name.clone())),
                     ),
                     (
                         "Driver".to_string(),
-                        OwnedValue::from(zbus::zvariant::Str::from("fake")),
+                        OwnedVariant::from(zbus::Str::from("fake")),
                     ),
                 ])
             })
@@ -366,9 +366,7 @@ impl FakeProvider {
         *state.profile.lock().unwrap() = profile.to_string();
         *state.profiles.lock().unwrap() = profiles.iter().map(|p| p.to_string()).collect();
         let conn = zbus::connection::Builder::address(bus.address.as_str())
-            .unwrap()
             .serve_at(PROVIDER_PATH, FakePowerProfiles(state.clone()))
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -376,7 +374,7 @@ impl FakeProvider {
         // still runs takes the name over, as a restarted daemon can.
         conn.request_name_with_flags(
             PROVIDER_NAME,
-            RequestNameFlags::AllowReplacement | RequestNameFlags::ReplaceExisting,
+            RequestNameFlags::ALLOW_REPLACEMENT | RequestNameFlags::REPLACE_EXISTING,
         )
         .await
         .unwrap();
@@ -404,7 +402,7 @@ impl FakeProvider {
         *self.state.profile.lock().unwrap() = profile.to_string();
         emit_changed(
             &self.state,
-            HashMap::from([("ActiveProfile", Value::from(3u32))]),
+            HashMap::from([("ActiveProfile", Variant::from(3u32))]),
         )
         .await;
     }
@@ -424,7 +422,7 @@ impl FakeProvider {
         *self.state.degraded.lock().unwrap() = reason.to_string();
         emit_changed(
             &self.state,
-            HashMap::from([("PerformanceDegraded", Value::from(reason))]),
+            HashMap::from([("PerformanceDegraded", Variant::from(reason))]),
         )
         .await;
     }
