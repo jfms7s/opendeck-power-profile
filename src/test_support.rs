@@ -5,14 +5,17 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::fs::{OpenOptions, Permissions};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tempfile::TempDir;
 use tokio::sync::mpsc;
 use zbus::Connection;
 use zbus::fdo::RequestNameFlags;
@@ -47,24 +50,35 @@ pub fn init_test_logging() {
 /// A throwaway message bus, killed on drop.
 pub struct PrivateBus {
     child: Child,
-    dir: PathBuf,
+    /// Kills `child` and removes `dir` if this process dies without dropping
+    /// the bus.
+    watchdog: Child,
+    /// Removed on drop, after the daemon is gone.
+    dir: TempDir,
     pub address: String,
 }
 
 impl PrivateBus {
     pub fn start() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "opendeck-power-profile-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let config = dir.join("bus.conf");
-        std::fs::write(
-            &config,
-            format!(
-                r#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+        // A fresh, owner-only directory with a random name: nothing another
+        // user created beforehand can stand in for it.
+        // (tempfile leaves the mode to the umask unless told.)
+        let dir = tempfile::Builder::new()
+            .prefix("opendeck-power-profile-test-")
+            .permissions(Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let config = dir.path().join("bus.conf");
+        // `create_new`: an existing file or symlink here is an error, never
+        // followed.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&config)
+            .unwrap();
+        write!(
+            file,
+            r#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
 <busconfig>
   <type>session</type>
@@ -76,10 +90,10 @@ impl PrivateBus {
   </policy>
 </busconfig>
 "#,
-                dir.display()
-            ),
+            dir.path().display()
         )
         .unwrap();
+        drop(file);
         let mut child = Command::new("dbus-daemon")
             .arg(format!("--config-file={}", config.display()))
             .args(["--nofork", "--print-address=1"])
@@ -87,15 +101,22 @@ impl PrivateBus {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("these tests need `dbus-daemon` on PATH (Debian/Ubuntu/Fedora package: dbus-daemon / dbus)");
+        let watchdog = spawn_watchdog(child.id(), dir.path());
         let mut address = String::new();
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut address)
             .unwrap();
         Self {
             child,
+            watchdog,
             dir,
             address: address.trim().to_string(),
         }
+    }
+
+    /// The directory the bus lives in (its config and socket).
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
     }
 
     /// Connects the hub to this bus instead of the system bus.
@@ -132,10 +153,35 @@ impl PrivateBus {
 
 impl Drop for PrivateBus {
     fn drop(&mut self) {
+        // The watchdog goes first, so it can never fire at a reused pid.
+        let _ = self.watchdog.kill();
+        let _ = self.watchdog.wait();
+        // Then the daemon; the `TempDir` field is removed after this.
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Starts a `sh` that kills `pid` and removes `dir` once its stdin reaches
+/// EOF. Only this process holds the write end (std's pipes are
+/// close-on-exec), so EOF means this process died: a killed test run then
+/// leaves neither a daemon nor its directory behind.
+/// (`PR_SET_PDEATHSIG` on the daemon would not do: on Fedora, exec'ing
+/// `dbus-daemon` is an SELinux domain transition, which clears it.)
+fn spawn_watchdog(pid: u32, dir: &Path) -> Child {
+    Command::new("sh")
+        .args([
+            "-c",
+            r#"read _; kill -9 "$1" 2>/dev/null; rm -rf -- "$2""#,
+            "private-bus-watchdog",
+        ])
+        .arg(pid.to_string())
+        .arg(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("these tests need `sh` on PATH")
 }
 
 /// The bus name and object path a fake provider exports, as power-profiles-daemon
