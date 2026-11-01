@@ -21,8 +21,6 @@ use crate::decision::{Available, Conditions, Hold, Profile};
 pub enum PowerProfilesError {
     #[error("D-Bus error: {0}")]
     Dbus(#[from] zbus::Error),
-    #[error("D-Bus error: {0}")]
-    Fdo(#[from] zbus::fdo::Error),
 }
 
 /// The one bus name, object path and interface the plugin talks to.

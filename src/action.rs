@@ -1,6 +1,6 @@
 use crate::decision::{Request, Snapshot};
 use crate::format::feedback_for;
-use crate::hub::{ProfileHub, Renderer};
+use crate::hub::{ProfileHub, Renderer, RequestError};
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,12 @@ impl PowerProfileAction {
 
     async fn request(&self, instance: &Instance, request: Request) -> OpenActionResult<()> {
         if let Err(e) = self.hub.request(request).await {
-            log::warn!("{request:?} failed: {e}");
+            // A dimmed dial is refused on every detent; the alert is the
+            // feedback, so don't also fill the log with it.
+            match e {
+                RequestError::NotConnected => log::debug!("{request:?} refused: {e}"),
+                RequestError::Dbus(_) => log::warn!("{request:?} failed: {e}"),
+            }
             return instance.show_alert().await;
         }
         Ok(())
