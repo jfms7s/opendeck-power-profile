@@ -459,6 +459,44 @@ async fn an_external_change_after_a_request_resets_the_base() {
     assert_eq!(provider.profile(), "balanced");
 }
 
+/// A provider without `performance` (power-profiles-daemon on hardware
+/// without a platform-profile driver): the dial clamps at Balanced and the
+/// bolt hint dims, instead of sending a Set the provider rejects.
+#[tokio::test]
+async fn a_profile_the_provider_does_not_list_is_never_requested() {
+    let bus = PrivateBus::start();
+    let provider =
+        FakeProvider::start_with_profiles(&bus, "balanced", &["power-saver", "balanced"]).await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect_where("Balanced without Performance", WITHIN, |s| {
+            s.state == known(Profile::Balanced) && !s.available.contains(Profile::Performance)
+        })
+        .await;
+
+    running.hub.request(Request::Step(1)).await.unwrap();
+    assert_eq!(provider.profile(), "balanced");
+    running.hub.request(Request::Step(-1)).await.unwrap();
+    assert_eq!(provider.profile(), "power-saver");
+}
+
+/// A `Profiles` list naming none of the three is ignored: all three stay
+/// reachable, as before the plugin read the list.
+#[tokio::test]
+async fn a_profiles_list_without_any_known_profile_offers_all_three() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start_with_profiles(&bus, "balanced", &["eco"]).await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    running.hub.request(Request::Step(1)).await.unwrap();
+    assert_eq!(provider.profile(), "performance");
+}
+
 #[tokio::test]
 async fn pressing_resets_to_balanced() {
     let bus = PrivateBus::start();

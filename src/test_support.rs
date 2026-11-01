@@ -195,6 +195,8 @@ pub type FakeHold = (String, String);
 #[derive(Default)]
 struct FakeState {
     profile: Mutex<String>,
+    /// The `Profile` names `Profiles` lists.
+    profiles: Mutex<Vec<String>>,
     holds: Mutex<Vec<FakeHold>>,
     degraded: Mutex<String>,
     /// Make reads of `ActiveProfileHolds` and `PerformanceDegraded` fail, as
@@ -323,6 +325,28 @@ impl FakePowerProfiles {
         }
         Ok(self.0.degraded.lock().unwrap().clone())
     }
+
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn profiles(&self) -> Vec<HashMap<String, OwnedValue>> {
+        self.0
+            .profiles
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|name| {
+                HashMap::from([
+                    (
+                        "Profile".to_string(),
+                        OwnedValue::from(zbus::zvariant::Str::from(name.clone())),
+                    ),
+                    (
+                        "Driver".to_string(),
+                        OwnedValue::from(zbus::zvariant::Str::from("fake")),
+                    ),
+                ])
+            })
+            .collect()
+    }
 }
 
 /// A fake power-profiles-daemon / tuned-ppd on a private bus.
@@ -331,9 +355,16 @@ pub struct FakeProvider {
 }
 
 impl FakeProvider {
+    /// A provider offering all three profiles, currently on `profile`.
     pub async fn start(bus: &PrivateBus, profile: &str) -> Self {
+        Self::start_with_profiles(bus, profile, &["power-saver", "balanced", "performance"]).await
+    }
+
+    /// A provider whose `Profiles` lists only `profiles`.
+    pub async fn start_with_profiles(bus: &PrivateBus, profile: &str, profiles: &[&str]) -> Self {
         let state = Arc::new(FakeState::default());
         *state.profile.lock().unwrap() = profile.to_string();
+        *state.profiles.lock().unwrap() = profiles.iter().map(|p| p.to_string()).collect();
         let conn = zbus::connection::Builder::address(bus.address.as_str())
             .unwrap()
             .serve_at(PROVIDER_PATH, FakePowerProfiles(state.clone()))

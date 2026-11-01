@@ -15,7 +15,7 @@ use zbus::proxy::CacheProperties;
 use zbus::zvariant::{OwnedValue, Value};
 use zbus::{Connection, proxy};
 
-use crate::decision::{Conditions, Hold, Profile};
+use crate::decision::{Available, Conditions, Hold, Profile};
 
 #[derive(Debug, Error)]
 pub enum PowerProfilesError {
@@ -34,8 +34,10 @@ const INTERFACE: &str = "org.freedesktop.UPower.PowerProfiles";
 const ACTIVE_PROFILE: &str = "ActiveProfile";
 const ACTIVE_PROFILE_HOLDS: &str = "ActiveProfileHolds";
 const PERFORMANCE_DEGRADED: &str = "PerformanceDegraded";
+const PROFILES: &str = "Profiles";
 
-/// One `ActiveProfileHolds` entry as it comes off the bus (`a{sv}`).
+/// One `ActiveProfileHolds` or `Profiles` entry as it comes off the bus
+/// (`a{sv}`).
 type RawHold = HashMap<String, OwnedValue>;
 
 // Must match `BUS_NAME`, `OBJECT_PATH` and `INTERFACE` (the macro needs
@@ -57,6 +59,9 @@ trait PowerProfiles {
 
     #[zbus(property)]
     fn performance_degraded(&self) -> zbus::Result<String>;
+
+    #[zbus(property)]
+    fn profiles(&self) -> zbus::Result<Vec<RawHold>>;
 }
 
 /// What a `PropertiesChanged` signal said. One signal can carry several
@@ -194,6 +199,28 @@ impl PowerProfilesClient {
             String::new()
         });
         Conditions { holds, degraded }
+    }
+
+    /// Reads `Profiles`: which of the three profiles the provider offers.
+    /// Never an error: when it can't be read, or names none of the three,
+    /// the dial offers all three as before (and logs why).
+    pub async fn available(&self) -> Available {
+        let names: Vec<String> = match self.proxy.profiles().await {
+            Ok(raw) => raw
+                .iter()
+                .map(|profile| string_field(profile, "Profile"))
+                .collect(),
+            Err(e) => {
+                log::warn!("reading {PROFILES} failed, offering all three profiles: {e}");
+                return Available::ALL;
+            }
+        };
+        Available::from_names(names.iter().map(String::as_str)).unwrap_or_else(|| {
+            log::warn!(
+                "{PROFILES} names none of the three profiles ({names:?}); offering all three"
+            );
+            Available::ALL
+        })
     }
 
     /// Same D-Bus call `powerprofilesctl set <name>` makes - no elevated

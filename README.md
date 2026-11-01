@@ -17,6 +17,10 @@ name, which tuned-ppd and power-profiles-daemon 0.20 and later export.
   clamped at both ends - it won't wrap around. Each detent is one step, even when you turn
   faster than the provider confirms the previous one.
 - **Press** to jump straight to Balanced, regardless of the current profile.
+- Profiles the provider doesn't offer are skipped by clamping: power-profiles-daemon leaves
+  Performance out on hardware without a platform-profile driver, and then the dial stops at
+  Balanced (its bolt hint dims) instead of asking for a profile the provider would refuse.
+  The plugin reads the provider's profile list once per connection.
 - The touch strip follows Elgato's dial style: the profile name on top, a gauge in the
   middle whose needle points at the active profile, and leaf / bolt hints either side
   showing which way to turn. A hint dims when turning that way would do nothing.
