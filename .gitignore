@@ -2,3 +2,4 @@
 /dist
 *.sdPlugin.zip
 .quality/
+.worktrees/
