@@ -1,0 +1,56 @@
+{
+  "code": 200,
+  "status": 0,
+  "device": {
+    "SERIAL1": {
+      "ProductType": 2,
+      "Product": "COMMANDER CORE XT",
+      "Serial": "SERIAL1",
+      "Firmware": "1.4.62",
+      "Hidden": false,
+      "DeviceType": 0,
+      "ProductId": 0,
+      "GetDevice": {
+        "manufacturer": "Corsair",
+        "product": "COMMANDER CORE XT",
+        "firmware": "1.4.62",
+        "aio": false,
+        "devices": {
+          "0": {
+            "channelId": 0,
+            "type": 0,
+            "deviceId": "Fan-0",
+            "name": "Fan 1",
+            "rpm": 975,
+            "temperature": 0,
+            "temperatureString": "",
+            "description": "Fan",
+            "profile": "Quiet",
+            "label": "Set Label",
+            "probeId": 0,
+            "minTemp": 0,
+            "maxTemp": 0,
+            "HasSpeed": true,
+            "HasTemps": false,
+            "IsTemperatureProbe": false,
+            "ExternalLed": false,
+            "CellSize": 4
+          }
+        },
+        "CpuTemp": 71.37,
+        "GpuTemp": 72,
+        "serial": "SERIAL1"
+      }
+    },
+    "cluster": {
+      "ProductType": 999,
+      "Product": "Cluster",
+      "Serial": "cluster",
+      "Firmware": "",
+      "GetDevice": null,
+      "Hidden": true,
+      "DeviceType": 0,
+      "ProductId": 0
+    }
+  }
+}

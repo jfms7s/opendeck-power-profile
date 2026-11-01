@@ -10,7 +10,7 @@ description = "OpenDeck plugin: step through power profiles (power-profiles-daem
 repository = "https://github.com/jfms7s/opendeck-power-profile"
 
 [dependencies]
-tokio = { version = "1.48", features = ["rt", "macros", "time"] }
+tokio = { version = "1.48", features = ["rt", "macros", "time", "net", "io-util", "sync"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 futures-util = "0.3"
 thiserror = "2"

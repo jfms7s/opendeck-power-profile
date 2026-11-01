@@ -1,4 +1,5 @@
 mod action;
+mod cooling;
 #[cfg(test)]
 mod dbus_tests;
 mod decision;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use action::{OpenDeckRenderer, PowerProfileAction};
+use cooling::{CoolingSync, OPENLINKHUB_ADDR, OpenLinkHub, REQUEST_TIMEOUT};
 use hub::{Connector, HubConfig, ProfileHub};
 use openaction::{OpenActionResult, register_action, run};
 
@@ -37,8 +39,11 @@ async fn main() -> OpenActionResult<()> {
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default())
         .expect("logger init");
 
+    // Switches OpenLinkHub's fan channels along with the profile, when it runs.
+    let cooling = CoolingSync::start(OpenLinkHub::new(OPENLINKHUB_ADDR, REQUEST_TIMEOUT));
     let hub = ProfileHub::new(
         Arc::new(OpenDeckRenderer),
+        vec![Arc::new(cooling)],
         HubConfig {
             retry_interval: RETRY_INTERVAL,
             pending_ttl: PENDING_TTL,
