@@ -45,7 +45,15 @@ startup).
 The D-Bus behaviour (connect, live updates, provider loss and restart, quick detents) is
 covered by automated tests against a fake provider on a private bus. What still needs a
 person is the real OpenDeck + Stream Deck + provider. Run this before publishing a release
-(`<unit>` is `tuned-ppd` or `power-profiles-daemon`, whichever `systemctl status` finds):
+(`<unit>` is `tuned-ppd` or `power-profiles-daemon`, whichever `systemctl status` finds),
+and record the result per item: pass, fail or **not run** (with why). Each release's draft
+notes start with this list, unticked: tick or annotate each item there before publishing.
+The full run (date, OpenDeck version, provider and its version, Stream Deck model,
+platform, per-item notes) goes in that release's smoke log, `releases/vX.Y.Z-smoke.md` in
+the maintainer's project notes (kept outside this repository), which the release notes
+link.
+
+<!-- smoke-checklist:start (scripts/release-body.mjs copies everything up to the end marker into each draft release) -->
 
 - [ ] Adding a Power Profile dial shows the current profile's name and a gauge whose
       needle points at it shortly after appearing.
@@ -70,6 +78,8 @@ person is the real OpenDeck + Stream Deck + provider. Run this before publishing
       dial recover within about 5 seconds and show the real current profile.
 - [ ] The plugin log (`~/.local/share/opendeck/logs/plugins/com.jfms7s.powerprofile.sdPlugin.log`)
       has no `[ERROR]` lines from the session.
+
+<!-- smoke-checklist:end -->
 
 ## Development
 
@@ -97,9 +107,12 @@ to require every architecture in the manifest's `CodePaths` and also write
    if they differ) and merge that to `master`.
 2. Push a tag `v<version>`. The Release workflow re-runs the checks, builds x86_64 and
    aarch64, refuses a tag that doesn't match the version, and creates a **draft** release
-   with the bundle and `SHA256SUMS` attached.
-3. Install the drafted bundle, run the smoke-test checklist, then publish the draft.
-   Ansible installs the latest *published* release, so publishing is what deploys it.
+   with the bundle and `SHA256SUMS` attached. The draft's notes start with the smoke-test
+   checklist above, unticked (`scripts/release-body.mjs`), followed by the generated
+   change list.
+3. Install the drafted bundle, run the smoke-test checklist, write the release's smoke
+   log, tick or annotate every item in the draft's notes and link the log, then publish
+   the draft. A draft whose checklist is still unticked has not been smoke-tested. Ansible installs the latest *published* release, so publishing is what deploys it.
    Releases are immutable once published (GitHub's immutable releases setting, on for
    this repository): the assets and the tag are frozen, so a broken release is fixed with
    a new version, never by replacing an asset. Before publishing, check that
