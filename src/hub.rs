@@ -319,7 +319,7 @@ impl ProfileHub {
             let end = self.session(&connector).await;
             let lost = matches!(end, SessionEnd::Lost(_));
             match end {
-                SessionEnd::NoProvider(e) if was_unreachable => log::debug!("{e}"),
+                end @ SessionEnd::NoProvider(_) if was_unreachable => log::debug!("{end}"),
                 end @ SessionEnd::NoProvider(_) => {
                     log::warn!(
                         "{end}; retrying every {:?}",
@@ -362,56 +362,68 @@ impl ProfileHub {
             Err(e) => return SessionEnd::NoProvider(e),
         };
         log::info!("connected to {}", client.bus_name());
-        match self.follow(&client).await {
-            Ok(reason) => SessionEnd::Lost(reason.to_string()),
-            Err(e) => SessionEnd::Lost(e.to_string()),
-        }
+        self.follow(&client).await
     }
 
-    /// Seeds the display from `client` and follows it until it goes away.
-    async fn follow(
-        &self,
-        client: &PowerProfilesClient,
-    ) -> Result<&'static str, PowerProfilesError> {
-        // Subscribe before the seed read, so a change between the two is not missed.
-        let mut owner_changes = Box::pin(client.owner_changes().await?);
-        let mut profile_changes = Box::pin(client.profile_changes().await?);
-        let seed = client.active_profile().await?;
+    /// Re-reads everything the strip shows - the active profile, the
+    /// conditions and the offered profiles - and renders it.
+    async fn resync(&self, client: &PowerProfilesClient) -> Result<(), PowerProfilesError> {
+        let name = client.active_profile().await?;
         let conditions = client.conditions().await;
         let available = client.available().await;
         self.apply(
-            Some(state_for_profile(&seed)),
+            Some(state_for_profile(&name)),
             Some(conditions),
             Some(available),
         )
         .await;
+        Ok(())
+    }
+
+    /// Seeds the display from `client` and follows it until it goes away.
+    /// A failure before the session is live (subscribing or the seed read)
+    /// means no usable provider; anything after that is a loss.
+    async fn follow(&self, client: &PowerProfilesClient) -> SessionEnd {
+        // Subscribe before the seed read, so a change between the two is not missed.
+        let subscribed = async {
+            let owner_changes = client.owner_changes().await?;
+            let profile_changes = client.profile_changes().await?;
+            Ok::<_, PowerProfilesError>((owner_changes, profile_changes))
+        };
+        let (owner_changes, profile_changes) = match subscribed.await {
+            Ok(streams) => streams,
+            Err(e) => return SessionEnd::NoProvider(e),
+        };
+        let (mut owner_changes, mut profile_changes) =
+            (Box::pin(owner_changes), Box::pin(profile_changes));
+        // The client goes in before the seed render, so a detent during that
+        // render's OpenDeck round trip steps from what is confirmed (nothing,
+        // from Unavailable) instead of being refused with an alert.
         self.set_client(Some(client.clone()));
+        if let Err(e) = self.resync(client).await {
+            return SessionEnd::NoProvider(e);
+        }
 
         loop {
             tokio::select! {
                 owner = owner_changes.next() => match owner {
                     // Another process took the name over: whatever we knew is stale.
                     Some(true) => {
-                        let name = client.active_profile().await?;
-                        let conditions = client.conditions().await;
-                        let available = client.available().await;
-                        self.apply(
-                            Some(state_for_profile(&name)),
-                            Some(conditions),
-                            Some(available),
-                        )
-                        .await;
+                        if let Err(e) = self.resync(client).await {
+                            return SessionEnd::Lost(e.to_string());
+                        }
                     }
-                    Some(false) => return Ok("its bus name lost its owner"),
-                    None => return Ok("the name-owner stream ended"),
+                    Some(false) => return SessionEnd::Lost("its bus name lost its owner".into()),
+                    None => return SessionEnd::Lost("the name-owner stream ended".into()),
                 },
                 update = profile_changes.next() => match update {
                     Some(ProfileUpdate::Changed(name)) => {
                         self.confirm(state_for_profile(&name)).await;
                     }
                     Some(ProfileUpdate::Invalidated) => {
-                        let name = client.active_profile().await?;
-                        self.confirm(state_for_profile(&name)).await;
+                        if let Err(e) = self.resync(client).await {
+                            return SessionEnd::Lost(e.to_string());
+                        }
                     }
                     Some(ProfileUpdate::Holds(holds)) => {
                         let degraded = lock(&self.inner.view).conditions.degraded.clone();
@@ -424,7 +436,9 @@ impl ProfileHub {
                     Some(ProfileUpdate::ConditionsInvalidated) => {
                         self.confirm_conditions(client.conditions().await).await;
                     }
-                    None => return Ok("the PropertiesChanged stream ended"),
+                    None => {
+                        return SessionEnd::Lost("the PropertiesChanged stream ended".into());
+                    }
                 },
             }
         }
