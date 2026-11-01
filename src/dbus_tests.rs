@@ -108,8 +108,10 @@ async fn renders_external_changes() {
         .await;
 }
 
-/// Regression test for 988121e: the 30 s "liveness probe" read zbus's
-/// property cache, so a provider that died after connect was never noticed.
+/// A provider that dies after connect must be noticed (the owner-loss
+/// path). Before 988121e a 30 s probe read zbus's property cache and never
+/// noticed; the uncached proxy itself is guarded by
+/// `resyncs_on_name_takeover_without_loss`.
 #[tokio::test]
 async fn renders_unavailable_when_the_provider_goes_away() {
     let bus = PrivateBus::start();
@@ -124,6 +126,67 @@ async fn renders_unavailable_when_the_provider_goes_away() {
     running
         .rendered
         .expect(ProfileState::Unavailable, WITHIN)
+        .await;
+}
+
+/// Another process taking the bus name over (without the name ever being
+/// free, and without announcing anything) must be picked up by re-reading
+/// the profile. Guards the uncached proxy (988121e): with zbus's property
+/// cache the re-read would answer the old provider's value.
+#[tokio::test]
+async fn resyncs_on_name_takeover_without_loss() {
+    let bus = PrivateBus::start();
+    let _first = FakeProvider::start(&bus, "power-saver").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::PowerSaver), WITHIN)
+        .await;
+
+    let _second = FakeProvider::start(&bus, "performance").await;
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+}
+
+/// A provider that only invalidates `ActiveProfile` (no value) must make the
+/// hub read it.
+#[tokio::test]
+async fn re_reads_when_the_provider_invalidates_the_profile() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "balanced").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    provider.change_by_invalidation("performance").await;
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+}
+
+/// An `ActiveProfile` announced as a non-string is treated as an
+/// invalidation: the hub reads the real value.
+#[tokio::test]
+async fn re_reads_when_the_provider_announces_a_non_string_profile() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "balanced").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    provider
+        .change_with_a_malformed_announcement("power-saver")
+        .await;
+    running
+        .rendered
+        .expect(known(Profile::PowerSaver), WITHIN)
         .await;
 }
 

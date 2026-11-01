@@ -15,6 +15,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use zbus::Connection;
+use zbus::fdo::RequestNameFlags;
 use zbus::names::InterfaceName;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{OwnedValue, Value};
@@ -184,12 +185,20 @@ fn holds_value(holds: &[FakeHold]) -> Vec<HashMap<String, OwnedValue>> {
 }
 
 async fn emit_changed(state: &FakeState, changed: HashMap<&str, Value<'_>>) {
+    emit_properties_changed(state, changed, &[]).await;
+}
+
+async fn emit_properties_changed(
+    state: &FakeState,
+    changed: HashMap<&str, Value<'_>>,
+    invalidated: &[&str],
+) {
     let emitter = SignalEmitter::new(state.conn.get().unwrap(), PROVIDER_PATH).unwrap();
     zbus::fdo::Properties::properties_changed(
         &emitter,
         InterfaceName::try_from(PROVIDER_NAME).unwrap(),
         changed,
-        Cow::Borrowed(&[]),
+        Cow::Borrowed(invalidated),
     )
     .await
     .unwrap();
@@ -283,11 +292,17 @@ impl FakeProvider {
             .unwrap()
             .serve_at(PROVIDER_PATH, FakePowerProfiles(state.clone()))
             .unwrap()
-            .name(PROVIDER_NAME)
-            .unwrap()
             .build()
             .await
             .unwrap();
+        // Replaceable, and replacing: a second fake started while this one
+        // still runs takes the name over, as a restarted daemon can.
+        conn.request_name_with_flags(
+            PROVIDER_NAME,
+            RequestNameFlags::AllowReplacement | RequestNameFlags::ReplaceExisting,
+        )
+        .await
+        .unwrap();
         state.conn.set(conn).unwrap();
         Self { state }
     }
@@ -297,6 +312,24 @@ impl FakeProvider {
     pub async fn change_externally(&self, profile: &str) {
         *self.state.profile.lock().unwrap() = profile.to_string();
         announce(&self.state, profile).await;
+    }
+
+    /// Changes the profile but only says `ActiveProfile` was invalidated,
+    /// without sending the new value, so a client has to read it.
+    pub async fn change_by_invalidation(&self, profile: &str) {
+        *self.state.profile.lock().unwrap() = profile.to_string();
+        emit_properties_changed(&self.state, HashMap::new(), &["ActiveProfile"]).await;
+    }
+
+    /// Changes the profile but announces `ActiveProfile` as a non-string, so
+    /// a client has to read the real value.
+    pub async fn change_with_a_malformed_announcement(&self, profile: &str) {
+        *self.state.profile.lock().unwrap() = profile.to_string();
+        emit_changed(
+            &self.state,
+            HashMap::from([("ActiveProfile", Value::from(3u32))]),
+        )
+        .await;
     }
 
     /// Simulates applications taking or releasing holds (`HoldProfile` /
