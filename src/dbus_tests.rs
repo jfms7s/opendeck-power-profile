@@ -72,6 +72,21 @@ const fn known(profile: Profile) -> ProfileState {
     ProfileState::Known(profile)
 }
 
+/// The harness's own bus: an owner-only directory with a random name,
+/// removed with the bus.
+#[test]
+fn the_private_bus_lives_in_an_owner_only_dir_removed_on_drop() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bus = PrivateBus::start();
+    let dir = bus.dir().to_path_buf();
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
+    assert!(dir.join("bus.conf").is_file());
+    drop(bus);
+    assert!(!dir.exists(), "{} left behind", dir.display());
+}
+
 #[tokio::test]
 async fn renders_the_providers_profile_on_connect() {
     let bus = PrivateBus::start();
