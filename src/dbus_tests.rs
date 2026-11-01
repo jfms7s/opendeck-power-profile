@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::cooling::{CoolingSync, OpenLinkHub};
 use crate::decision::{Profile, ProfileState, Request};
 use crate::hub::{Connector, HubConfig, ProfileHub, ProfileObserver, RequestError};
+use crate::instances::Instances;
 use crate::test_support::{
     FakeOpenLinkHub, FakeProvider, PrivateBus, Rendered, panic_once_renderer, recording_renderer,
 };
@@ -24,6 +25,7 @@ const WITHIN: Duration = Duration::from_secs(3);
 
 struct Running {
     hub: ProfileHub,
+    instances: Arc<Instances>,
     rendered: Rendered,
     task: JoinHandle<()>,
 }
@@ -66,14 +68,16 @@ fn start_hub_configured(
 ) -> Running {
     // Hub warnings show up in a failing test's captured output.
     crate::test_support::init_test_logging();
-    let (renderer, rendered) = recording_renderer();
-    let hub = ProfileHub::new(renderer, observers, config);
+    let tracked = Arc::new(Instances::default());
     for id in instances {
-        hub.track(id);
+        tracked.track(id);
     }
+    let (renderer, rendered) = recording_renderer(tracked.clone());
+    let hub = ProfileHub::new(renderer, observers, config);
     let task = tokio::spawn(hub.clone().run(connector));
     Running {
         hub,
+        instances: tracked,
         rendered,
         task,
     }
@@ -625,7 +629,7 @@ async fn renders_only_to_tracked_instances() {
     let bus = PrivateBus::start();
     let running_hub_instances = ["a", "b"];
     let mut running = start_hub(&bus, &running_hub_instances);
-    running.hub.untrack("b");
+    running.instances.untrack("b");
     let _provider = FakeProvider::start(&bus, "balanced").await;
 
     let (ids, snapshot) = running.rendered.next(WITHIN).await;
@@ -855,7 +859,9 @@ async fn a_watcher_panic_renders_unavailable_and_recovers() {
     crate::test_support::init_test_logging();
     let bus = PrivateBus::start();
     let provider = FakeProvider::start(&bus, "balanced").await;
-    let (renderer, rendered) = panic_once_renderer(known(Profile::Performance));
+    let instances = Arc::new(Instances::default());
+    instances.track("dial");
+    let (renderer, rendered) = panic_once_renderer(instances.clone(), known(Profile::Performance));
     let hub = ProfileHub::new(
         renderer,
         Vec::new(),
@@ -864,10 +870,10 @@ async fn a_watcher_panic_renders_unavailable_and_recovers() {
             pending_ttl: PENDING_TTL,
         },
     );
-    hub.track("dial");
     let task = tokio::spawn(hub.clone().run_supervised(bus.connector()));
     let mut running = Running {
         hub,
+        instances,
         rendered,
         task,
     };

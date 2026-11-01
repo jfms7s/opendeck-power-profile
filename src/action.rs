@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use crate::decision::{Request, Snapshot};
 use crate::format::feedback_for;
 use crate::hub::{ProfileHub, Renderer, RequestError};
+use crate::instances::Instances;
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
@@ -11,18 +14,31 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PowerProfileSettings {}
 
-/// Renders hub state changes onto OpenDeck instances' touch strips.
-pub struct OpenDeckRenderer;
+/// Draws `snapshot` on one instance. The only place anything is drawn: the
+/// renderer calls it for every change, `will_appear` for a new instance.
+async fn draw(instance: &Instance, snapshot: &Snapshot) -> OpenActionResult<()> {
+    instance.set_feedback(&feedback_for(snapshot)).await
+}
+
+/// Renders hub state changes onto every tracked OpenDeck instance.
+pub struct OpenDeckRenderer {
+    instances: Arc<Instances>,
+}
+
+impl OpenDeckRenderer {
+    pub fn new(instances: Arc<Instances>) -> Self {
+        Self { instances }
+    }
+}
 
 #[async_trait]
 impl Renderer for OpenDeckRenderer {
-    async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot) {
-        let feedback = feedback_for(snapshot);
-        for instance_id in instance_ids {
+    async fn render(&self, snapshot: &Snapshot) {
+        for instance_id in self.instances.ids() {
             let Some(instance) = openaction::get_instance(instance_id.clone()).await else {
-                continue; // disappeared since the hub snapshotted its registry
+                continue; // disappeared since the IDs were read
             };
-            if let Err(e) = instance.set_feedback(&feedback).await {
+            if let Err(e) = draw(&instance, snapshot).await {
                 log::warn!("render to {instance_id} failed: {e}");
             }
         }
@@ -32,11 +48,12 @@ impl Renderer for OpenDeckRenderer {
 /// The "Power Profile" dial: translates OpenDeck events into hub calls.
 pub struct PowerProfileAction {
     hub: ProfileHub,
+    instances: Arc<Instances>,
 }
 
 impl PowerProfileAction {
-    pub fn new(hub: ProfileHub) -> Self {
-        Self { hub }
+    pub fn new(hub: ProfileHub, instances: Arc<Instances>) -> Self {
+        Self { hub, instances }
     }
 
     async fn request(&self, instance: &Instance, request: Request) -> OpenActionResult<()> {
@@ -63,8 +80,9 @@ impl Action for PowerProfileAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        let snapshot = self.hub.track(&instance.instance_id);
-        instance.set_feedback(&feedback_for(&snapshot)).await
+        // Track first: a change from here on is rendered to it as well.
+        self.instances.track(&instance.instance_id);
+        draw(instance, &self.hub.snapshot()).await
     }
 
     async fn will_disappear(
@@ -72,7 +90,7 @@ impl Action for PowerProfileAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        self.hub.untrack(&instance.instance_id);
+        self.instances.untrack(&instance.instance_id);
         Ok(())
     }
 

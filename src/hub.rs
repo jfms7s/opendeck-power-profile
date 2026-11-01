@@ -1,13 +1,13 @@
 //! The plugin's state hub: owns the D-Bus client, what the plugin knows about
-//! the active profile, the set of on-screen instances, and the watch loop
-//! that keeps them in sync. `action.rs` only translates OpenDeck events into
-//! calls on this.
+//! the active profile, and the watch loop that keeps it in sync. Which
+//! instances are on screen is the renderer's business (`instances.rs`).
+//! `action.rs` only translates OpenDeck events into calls on this.
 //!
 //! The watch loop is the only thing that renders a profile change, whether
 //! the change came from this plugin or from outside, so the two can never
 //! disagree. Dial requests never render; they only ask the provider.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -23,12 +23,13 @@ use crate::decision::{
 };
 use crate::power_profiles::{PowerProfilesClient, PowerProfilesError, ProfileUpdate};
 
-/// Pushes a snapshot to the touch strips of on-screen instances. The
-/// production renderer talks to OpenDeck; tests record what would have been
-/// shown.
+/// Shows every change in what the dial displays, in order (the hub awaits
+/// each render). Knows nothing the hub doesn't: which instances are on
+/// screen is the renderer's business. The production renderer draws to
+/// OpenDeck; tests record what would have been shown.
 #[async_trait]
 pub trait Renderer: Send + Sync + 'static {
-    async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot);
+    async fn render(&self, snapshot: &Snapshot);
 }
 
 /// Told about every change the touch strip shows, with what it showed
@@ -171,7 +172,6 @@ struct Inner {
     // Plain mutexes: none of them is ever held across an `.await`.
     client: Mutex<Option<PowerProfilesClient>>,
     view: Mutex<View>,
-    registry: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -217,23 +217,17 @@ impl ProfileHub {
                 config,
                 client: Mutex::new(None),
                 view: Mutex::new(View::new(config.pending_ttl)),
-                registry: Mutex::new(HashSet::new()),
             }),
         }
     }
 
-    /// Starts tracking an on-screen instance; returns what to draw it with.
-    pub fn track(&self, instance_id: &str) -> Snapshot {
-        lock(&self.inner.registry).insert(instance_id.to_string());
+    /// What the dial shows now: what to draw an instance that just appeared with.
+    pub fn snapshot(&self) -> Snapshot {
         lock(&self.inner.view).snapshot()
     }
 
-    pub fn untrack(&self, instance_id: &str) {
-        lock(&self.inner.registry).remove(instance_id);
-    }
-
-    /// Records a state the provider confirmed and renders it to every tracked
-    /// instance - unless it is what they already show.
+    /// Records a state the provider confirmed and renders it - unless it is
+    /// what the dial already shows.
     async fn confirm(&self, state: ProfileState) {
         self.apply(Some(state), None, None).await;
     }
@@ -269,11 +263,7 @@ impl ProfileHub {
         for observer in &self.inner.observers {
             observer.changed(&previous, &snapshot);
         }
-        let instance_ids: Vec<String> = lock(&self.inner.registry).iter().cloned().collect();
-        self.inner
-            .renderer
-            .render_all(&instance_ids, &snapshot)
-            .await;
+        self.inner.renderer.render(&snapshot).await;
     }
 
     fn set_client(&self, client: Option<PowerProfilesClient>) {
