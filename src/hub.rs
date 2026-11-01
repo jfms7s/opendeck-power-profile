@@ -18,14 +18,17 @@ use futures_util::future::BoxFuture;
 use thiserror::Error;
 use zbus::Connection;
 
-use crate::decision::{Profile, ProfileState, Request, state_for_profile, target_for};
+use crate::decision::{
+    Conditions, Profile, ProfileState, Request, Snapshot, state_for_profile, target_for,
+};
 use crate::power_profiles::{PowerProfilesClient, PowerProfilesError, ProfileUpdate};
 
-/// Pushes a state to the touch strips of on-screen instances. The production
-/// renderer talks to OpenDeck; tests record what would have been shown.
+/// Pushes a snapshot to the touch strips of on-screen instances. The
+/// production renderer talks to OpenDeck; tests record what would have been
+/// shown.
 #[async_trait]
 pub trait Renderer: Send + Sync + 'static {
-    async fn render_all(&self, instance_ids: &[String], state: ProfileState);
+    async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot);
 }
 
 /// Opens a fresh bus connection for each (re)connect attempt.
@@ -56,6 +59,9 @@ pub enum RequestError {
 struct View {
     /// The last state the provider confirmed - what is rendered.
     confirmed: ProfileState,
+    /// The provider's holds and degradation, rendered beside `confirmed`.
+    /// Display only: the stepping rules never look at it.
+    conditions: Conditions,
     /// Requested but unconfirmed profiles, oldest first, each with when it
     /// was requested. Rotations step from the newest one still younger than
     /// the TTL, so detents inside one D-Bus round trip each move a profile,
@@ -72,6 +78,7 @@ impl View {
     fn new(ttl: Duration) -> Self {
         Self {
             confirmed: ProfileState::Unavailable,
+            conditions: Conditions::default(),
             in_flight: VecDeque::new(),
             ttl,
         }
@@ -117,6 +124,22 @@ impl View {
         let changed = self.confirmed != state;
         self.confirmed = state;
         changed
+    }
+
+    /// Records the provider's holds and degradation; returns whether they
+    /// differ from before (whether to render).
+    fn set_conditions(&mut self, conditions: Conditions) -> bool {
+        let changed = self.conditions != conditions;
+        self.conditions = conditions;
+        changed
+    }
+
+    /// What the touch strip shows.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            state: self.confirmed,
+            conditions: self.conditions.clone(),
+        }
     }
 }
 
@@ -172,10 +195,10 @@ impl ProfileHub {
         }
     }
 
-    /// Starts tracking an on-screen instance; returns the state to draw it with.
-    pub fn track(&self, instance_id: &str) -> ProfileState {
+    /// Starts tracking an on-screen instance; returns what to draw it with.
+    pub fn track(&self, instance_id: &str) -> Snapshot {
         lock(&self.inner.registry).insert(instance_id.to_string());
-        lock(&self.inner.view).confirmed
+        lock(&self.inner.view).snapshot()
     }
 
     pub fn untrack(&self, instance_id: &str) {
@@ -185,11 +208,33 @@ impl ProfileHub {
     /// Records a state the provider confirmed and renders it to every tracked
     /// instance - unless it is what they already show.
     async fn confirm(&self, state: ProfileState) {
-        if !lock(&self.inner.view).confirm(state) {
-            return;
-        }
+        self.apply(Some(state), None).await;
+    }
+
+    /// Records the provider's holds and degradation and renders them, unless
+    /// they are what the instances already show.
+    async fn confirm_conditions(&self, conditions: Conditions) {
+        self.apply(None, Some(conditions)).await;
+    }
+
+    /// Records whichever of the two is given and renders once if either
+    /// changed what the strip shows.
+    async fn apply(&self, state: Option<ProfileState>, conditions: Option<Conditions>) {
+        let snapshot = {
+            let mut view = lock(&self.inner.view);
+            let state_changed = state.is_some_and(|state| view.confirm(state));
+            let conditions_changed =
+                conditions.is_some_and(|conditions| view.set_conditions(conditions));
+            if !state_changed && !conditions_changed {
+                return;
+            }
+            view.snapshot()
+        };
         let instance_ids: Vec<String> = lock(&self.inner.registry).iter().cloned().collect();
-        self.inner.renderer.render_all(&instance_ids, state).await;
+        self.inner
+            .renderer
+            .render_all(&instance_ids, &snapshot)
+            .await;
     }
 
     fn set_client(&self, client: Option<PowerProfilesClient>) {
@@ -241,7 +286,9 @@ impl ProfileHub {
                 }
             }
             self.set_client(None);
-            self.confirm(ProfileState::Unavailable).await;
+            // Holds belong to the provider that is gone.
+            self.apply(Some(ProfileState::Unavailable), Some(Conditions::default()))
+                .await;
             tokio::time::sleep(self.inner.config.retry_interval).await;
         }
     }
@@ -272,7 +319,9 @@ impl ProfileHub {
         let mut owner_changes = Box::pin(client.owner_changes().await?);
         let mut profile_changes = Box::pin(client.profile_changes().await?);
         let seed = client.active_profile().await?;
-        self.confirm(state_for_profile(&seed)).await;
+        let conditions = client.conditions().await;
+        self.apply(Some(state_for_profile(&seed)), Some(conditions))
+            .await;
         self.set_client(Some(client.clone()));
 
         loop {
@@ -281,7 +330,9 @@ impl ProfileHub {
                     // Another process took the name over: whatever we knew is stale.
                     Some(true) => {
                         let name = client.active_profile().await?;
-                        self.confirm(state_for_profile(&name)).await;
+                        let conditions = client.conditions().await;
+                        self.apply(Some(state_for_profile(&name)), Some(conditions))
+                            .await;
                     }
                     Some(false) => return Ok("its bus name lost its owner"),
                     None => return Ok("the name-owner stream ended"),
@@ -293,6 +344,17 @@ impl ProfileHub {
                     Some(ProfileUpdate::Invalidated) => {
                         let name = client.active_profile().await?;
                         self.confirm(state_for_profile(&name)).await;
+                    }
+                    Some(ProfileUpdate::Holds(holds)) => {
+                        let degraded = lock(&self.inner.view).conditions.degraded.clone();
+                        self.confirm_conditions(Conditions { holds, degraded }).await;
+                    }
+                    Some(ProfileUpdate::Degraded(degraded)) => {
+                        let holds = lock(&self.inner.view).conditions.holds.clone();
+                        self.confirm_conditions(Conditions { holds, degraded }).await;
+                    }
+                    Some(ProfileUpdate::ConditionsInvalidated) => {
+                        self.confirm_conditions(client.conditions().await).await;
                     }
                     None => return Ok("the PropertiesChanged stream ended"),
                 },
@@ -388,6 +450,21 @@ mod tests {
         assert_eq!(view.base(then + TTL), ProfileState::Known(PowerSaver));
         // The next request steps from the confirmed state and drops the stale one.
         assert_eq!(step(&mut view, 1, then + TTL), Balanced);
+        assert_eq!(view.in_flight.len(), 1);
+    }
+
+    #[test]
+    fn conditions_never_touch_the_stepping_base() {
+        let now = Instant::now();
+        let mut view = known_view(Balanced);
+        step(&mut view, 1, now);
+        let held = Conditions {
+            holds: vec![crate::decision::Hold::default()],
+            degraded: String::new(),
+        };
+        assert!(view.set_conditions(held.clone()));
+        assert!(!view.set_conditions(held));
+        assert_eq!(view.base(now), ProfileState::Known(Performance));
         assert_eq!(view.in_flight.len(), 1);
     }
 
