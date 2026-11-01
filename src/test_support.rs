@@ -495,11 +495,21 @@ pub fn recording_renderer() -> (Arc<RecordingRenderer>, Rendered) {
     (Arc::new(RecordingRenderer(tx)), Rendered(rx))
 }
 
+/// How long `Rendered::expect_settled` watches for a stray render.
+const SETTLE: Duration = Duration::from_millis(200);
+
 impl Rendered {
     /// Waits until the hub renders `want`, failing if it doesn't within `within`.
     pub async fn expect(&mut self, want: ProfileState, within: Duration) {
         self.expect_where(&format!("{want:?}"), within, |s| s.state == want)
             .await;
+    }
+
+    /// Waits until the hub renders `want`, and nothing else is rendered
+    /// after it for `SETTLE` (no spurious revert or flicker).
+    pub async fn expect_settled(&mut self, want: ProfileState, within: Duration) {
+        self.expect(want, within).await;
+        self.expect_quiet(SETTLE).await;
     }
 
     /// Waits until the hub renders a snapshot whose status line is `want`.
