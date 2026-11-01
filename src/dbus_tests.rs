@@ -4,6 +4,7 @@
 //! machine's real power profile is never touched.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -46,17 +47,27 @@ fn start_hub_observed(
     instances: &[&str],
     observers: Vec<Arc<dyn ProfileObserver>>,
 ) -> Running {
-    // Hub warnings show up in a failing test's captured output.
-    crate::test_support::init_test_logging();
-    let (renderer, rendered) = recording_renderer();
-    let hub = ProfileHub::new(
-        renderer,
+    start_hub_configured(
+        connector,
+        instances,
         observers,
         HubConfig {
             retry_interval: RETRY,
             pending_ttl: PENDING_TTL,
         },
-    );
+    )
+}
+
+fn start_hub_configured(
+    connector: Connector,
+    instances: &[&str],
+    observers: Vec<Arc<dyn ProfileObserver>>,
+    config: HubConfig,
+) -> Running {
+    // Hub warnings show up in a failing test's captured output.
+    crate::test_support::init_test_logging();
+    let (renderer, rendered) = recording_renderer();
+    let hub = ProfileHub::new(renderer, observers, config);
     for id in instances {
         hub.track(id);
     }
@@ -228,6 +239,62 @@ async fn resyncs_when_the_provider_restarts_with_a_different_profile() {
     // Stepping from the stale Power Saver would *lower* it to Balanced.
     running.hub.request(Request::Step(1)).await.unwrap();
     assert_eq!(restarted.profile(), "performance");
+}
+
+/// After losing the provider the hub reconnects at once, without waiting a
+/// retry interval first, so a restart that is already over (or a provider
+/// D-Bus activates again) costs no wait.
+#[tokio::test]
+async fn reconnects_at_once_after_losing_the_provider() {
+    // Long enough that waiting it out is unmistakable.
+    const SLOW_RETRY: Duration = Duration::from_secs(2);
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "balanced").await;
+    // Hold the reconnect (the second connect) until the new provider is up,
+    // so the test doesn't race the hub's first attempt against its start.
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let connects = Arc::new(AtomicUsize::new(0));
+    let connector: Connector = {
+        let inner = bus.connector();
+        let gate = gate.clone();
+        let connects = connects.clone();
+        Arc::new(move || {
+            let inner = inner.clone();
+            let gate = gate.clone();
+            let attempt = connects.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if attempt == 1 {
+                    gate.acquire().await.unwrap().forget();
+                }
+                inner().await
+            })
+        })
+    };
+    let mut running = start_hub_configured(
+        connector,
+        &["dial"],
+        Vec::new(),
+        HubConfig {
+            retry_interval: SLOW_RETRY,
+            pending_ttl: PENDING_TTL,
+        },
+    );
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    provider.stop().await;
+    running
+        .rendered
+        .expect(ProfileState::Unavailable, WITHIN)
+        .await;
+    let _restarted = FakeProvider::start(&bus, "performance").await;
+    gate.add_permits(1);
+    running
+        .rendered
+        .expect(known(Profile::Performance), SLOW_RETRY / 2)
+        .await;
 }
 
 /// The provider starting after OpenDeck (or coming back after an outage)

@@ -283,13 +283,21 @@ impl ProfileHub {
     }
 
     /// Runs forever: connects to the provider, renders its profile, follows
-    /// its changes, and on losing it renders "Unavailable" and reconnects
-    /// every `retry_interval`. `connector` opens the bus connection (the
-    /// system bus in production).
+    /// its changes, and on losing it renders "Unavailable" and reconnects -
+    /// at once the first time (a restart is usually over by then, or the
+    /// attempt D-Bus-activates the provider), then every `retry_interval`.
+    /// `connector` opens the bus connection (the system bus in production).
     pub async fn run(self, connector: Connector) {
+        let retry_interval = self.inner.config.retry_interval;
         let mut was_unreachable = false;
+        // When the last reconnect skipped the wait. At most one skip per
+        // `retry_interval`, so a provider that drops every session at once
+        // can't make this spin.
+        let mut last_immediate: Option<Instant> = None;
         loop {
-            match self.session(&connector).await {
+            let end = self.session(&connector).await;
+            let lost = matches!(end, SessionEnd::Lost(_));
+            match end {
                 SessionEnd::NoProvider(e) if was_unreachable => log::debug!("{e}"),
                 end @ SessionEnd::NoProvider(_) => {
                     log::warn!(
@@ -307,7 +315,14 @@ impl ProfileHub {
             // Holds belong to the provider that is gone.
             self.apply(Some(ProfileState::Unavailable), Some(Conditions::default()))
                 .await;
-            tokio::time::sleep(self.inner.config.retry_interval).await;
+            let now = Instant::now();
+            let retry_at_once =
+                lost && last_immediate.is_none_or(|at| now.duration_since(at) >= retry_interval);
+            if retry_at_once {
+                last_immediate = Some(now);
+            } else {
+                tokio::time::sleep(retry_interval).await;
+            }
         }
     }
 

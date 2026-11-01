@@ -36,8 +36,15 @@ const METHOD_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> OpenActionResult<()> {
-    simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default())
-        .expect("logger init");
+    simplelog::CombinedLogger::init(
+        log_filters()
+            .into_iter()
+            .map(|(level, config)| -> Box<dyn simplelog::SharedLogger> {
+                simplelog::SimpleLogger::new(level, config)
+            })
+            .collect(),
+    )
+    .expect("logger init");
 
     // Switches OpenLinkHub's fan channels along with the profile, when it runs.
     let cooling = CoolingSync::start(OpenLinkHub::new(OPENLINKHUB_ADDR, REQUEST_TIMEOUT));
@@ -63,6 +70,25 @@ async fn main() -> OpenActionResult<()> {
     run(std::env::args().collect()).await
 }
 
+/// The plugin log, as (level, filter) pairs for one logger each: the
+/// plugin's own records (and everything else) at Info, but zbus only at
+/// Warn - its connection handshake logs at Info, and a reconnect attempt
+/// every few seconds while the provider is away would fill the log with it.
+/// zbus warnings still get through (they reach `log` via `tracing`).
+fn log_filters() -> [(log::LevelFilter, simplelog::Config); 2] {
+    let everything_but_zbus = simplelog::ConfigBuilder::new()
+        .add_filter_ignore_str("zbus")
+        .add_filter_ignore_str("tracing::span")
+        .build();
+    let zbus = simplelog::ConfigBuilder::new()
+        .add_filter_allow_str("zbus")
+        .build();
+    [
+        (log::LevelFilter::Info, everything_but_zbus),
+        (log::LevelFilter::Warn, zbus),
+    ]
+}
+
 /// Keeps the watch loop alive: `ProfileHub::run` never returns, so the only
 /// way it ends is a panic - log it and start a fresh one rather than leave
 /// the dial frozen on its last state.
@@ -73,5 +99,62 @@ async fn supervise(hub: ProfileHub, connector: Connector) {
             log::error!("power profile watcher stopped ({e}); restarting it");
         }
         tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    use log::{Level, Log, Record};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_log_keeps_zbus_warnings_and_our_info_but_not_zbus_info() {
+        let buf = SharedBuf::default();
+        let logger = simplelog::CombinedLogger::new(
+            log_filters()
+                .into_iter()
+                .map(|(level, config)| -> Box<dyn simplelog::SharedLogger> {
+                    simplelog::WriteLogger::new(level, config, buf.clone())
+                })
+                .collect(),
+        );
+        let log = |level, target, message| {
+            logger.log(
+                &Record::builder()
+                    .level(level)
+                    .target(target)
+                    .args(format_args!("{message}"))
+                    .build(),
+            );
+        };
+        log(
+            Level::Info,
+            "zbus::connection::handshake::common",
+            "zbus handshake chatter",
+        );
+        log(Level::Info, "tracing::span", "span chatter");
+        log(Level::Warn, "zbus::connection", "zbus warning");
+        log(Level::Info, "opendeck_power_profile::hub", "our info");
+        let written = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(!written.contains("zbus handshake chatter"), "{written}");
+        assert!(!written.contains("span chatter"), "{written}");
+        assert_eq!(written.matches("zbus warning").count(), 1, "{written}");
+        assert_eq!(written.matches("our info").count(), 1, "{written}");
     }
 }

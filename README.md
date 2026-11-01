@@ -40,8 +40,8 @@ name, which tuned-ppd and power-profiles-daemon 0.20 and later export.
   `cooling sync: ...`.
 - If the provider goes away (its process exits or its service is stopped) the dial shows
   "Unavailable" as soon as the bus reports its name gone, and the plugin tries to reconnect
-  every 5 seconds; once the provider is back the dial shows the real current profile within
-  about 5 seconds. Both providers are D-Bus activatable, so on most systems a reconnect
+  at once, then every 5 seconds; once the provider is back the dial shows the real current
+  profile within about 5 seconds (at once after a quick restart). Both providers are D-Bus activatable, so on most systems a reconnect
   attempt starts the provider again by itself and "Unavailable" lasts only a moment, unless
   its service is masked.
 
@@ -99,7 +99,9 @@ link.
       as it was. Restarting OpenDeck does not change any channel.
 - [ ] `sudo systemctl mask --runtime <unit> && sudo systemctl stop <unit>` makes the dial
       show "Unavailable" within a second or two and keeps it there (masking stops the
-      plugin's reconnect from D-Bus-activating the provider again).
+      plugin's reconnect from D-Bus-activating the provider again). Over the next minute
+      the plugin log gains two `[WARN]` lines (provider lost, then not reachable) and no
+      `[INFO]` lines from `zbus` (its connection handshake).
 - [ ] `sudo systemctl unmask --runtime <unit> && sudo systemctl start <unit>` makes the
       dial recover within about 5 seconds and show the real current profile.
 - [ ] The plugin log (`~/.local/share/opendeck/logs/plugins/com.jfms7s.powerprofile.sdPlugin.log`)
