@@ -62,6 +62,48 @@ pub enum ProfileState {
     Unavailable,
 }
 
+/// One `ActiveProfileHolds` entry: an application asking the provider to keep
+/// a profile (GameMode asking for performance, say). Fields the provider
+/// left out or sent with the wrong type are empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Hold {
+    pub application_id: String,
+    /// The `ActiveProfile` string the hold asks for.
+    pub profile: String,
+    pub reason: String,
+}
+
+/// What the provider reports beside the active profile. Display only: none of
+/// it changes what a dial gesture requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Conditions {
+    /// `ActiveProfileHolds`, in the provider's order.
+    pub holds: Vec<Hold>,
+    /// `PerformanceDegraded`: empty, or why performance is limited
+    /// (`lap-detected`, `high-operating-temperature`).
+    pub degraded: String,
+}
+
+/// Everything the touch strip shows: the profile state plus the conditions.
+/// Kept apart from `ProfileState`, which the stepping rules work on and which
+/// stays `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub state: ProfileState,
+    pub conditions: Conditions,
+}
+
+#[cfg(test)]
+impl Snapshot {
+    /// A state with no holds and no degradation.
+    pub fn plain(state: ProfileState) -> Self {
+        Self {
+            state,
+            conditions: Conditions::default(),
+        }
+    }
+}
+
 /// Classifies a freshly-read `ActiveProfile` string into a `ProfileState`.
 pub fn state_for_profile(name: &str) -> ProfileState {
     match Profile::from_dbus(name) {

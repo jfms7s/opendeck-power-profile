@@ -1,5 +1,5 @@
-use crate::decision::{ProfileState, Request};
-use crate::format::feedback_for_state;
+use crate::decision::{Request, Snapshot};
+use crate::format::feedback_for;
 use crate::hub::{ProfileHub, Renderer};
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
@@ -16,8 +16,8 @@ pub struct OpenDeckRenderer;
 
 #[async_trait]
 impl Renderer for OpenDeckRenderer {
-    async fn render_all(&self, instance_ids: &[String], state: ProfileState) {
-        let feedback = feedback_for_state(state);
+    async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot) {
+        let feedback = feedback_for(snapshot);
         for instance_id in instance_ids {
             let Some(instance) = openaction::get_instance(instance_id.clone()).await else {
                 continue; // disappeared since the hub snapshotted its registry
@@ -58,8 +58,8 @@ impl Action for PowerProfileAction {
         instance: &Instance,
         _settings: &Self::Settings,
     ) -> OpenActionResult<()> {
-        let state = self.hub.track(&instance.instance_id);
-        instance.set_feedback(&feedback_for_state(state)).await
+        let snapshot = self.hub.track(&instance.instance_id);
+        instance.set_feedback(&feedback_for(&snapshot)).await
     }
 
     async fn will_disappear(

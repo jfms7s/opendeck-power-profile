@@ -21,6 +21,11 @@ power-profiles-daemon releases that only export that one.
 - The touch strip follows Elgato's dial style: the profile name on top, a gauge in the
   middle whose needle points at the active profile, and leaf / bolt hints either side
   showing which way to turn. A hint dims when turning that way would do nothing.
+- A line under the gauge says who holds the profile when an application has asked the
+  provider to keep one (`Held by <app>`, e.g. GameMode asking for Performance; `+N` when
+  several do), or, with no hold, why performance is limited (`Limited: lap detected` /
+  `Limited: too hot`). Turning the dial during a hold still steps as usual; the provider
+  then releases the hold and the line clears.
 - The touch strip updates live even when the profile changes from somewhere else (a
   desktop applet, another key, `powerprofilesctl` in a terminal) - it subscribes to the
   provider's D-Bus change notifications rather than polling.
@@ -71,6 +76,13 @@ link.
       `busctl set-property org.freedesktop.UPower.PowerProfiles
       /org/freedesktop/UPower/PowerProfiles org.freedesktop.UPower.PowerProfiles
       ActiveProfile s performance`.
+- [ ] A hand-made hold shows on the strip and clears. Providers drop a hold when its
+      caller leaves the bus, so it needs a process that stays connected (`busctl call`
+      exits at once); with the dial at Balanced, run
+      `python3 -c 'from gi.repository import Gio, GLib; b = Gio.bus_get_sync(Gio.BusType.SYSTEM); b.call_sync("org.freedesktop.UPower.PowerProfiles", "/org/freedesktop/UPower/PowerProfiles", "org.freedesktop.UPower.PowerProfiles", "HoldProfile", GLib.Variant("(sss)", ("performance", "smoke test", "smoke-app")), None, 0, -1, None); GLib.MainLoop().run()'`
+      (needs PyGObject, which tuned-ppd already pulls in). The dial moves to Performance
+      and shows "Held by smoke-app"; Ctrl+C releases the hold and the line clears. Run it
+      again and turn the dial instead: it steps as usual and the line clears.
 - [ ] `sudo systemctl mask --runtime <unit> && sudo systemctl stop <unit>` makes the dial
       show "Unavailable" within a second or two and keeps it there (masking stops the
       plugin's reconnect from D-Bus-activating the provider again).

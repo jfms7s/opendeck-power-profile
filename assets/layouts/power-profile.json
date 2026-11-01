@@ -25,6 +25,15 @@
 			"key": "right",
 			"type": "pixmap",
 			"rect": [146, 46, 32, 32]
+		},
+		{
+			"key": "status",
+			"type": "text",
+			"rect": [0, 82, 200, 16],
+			"alignment": "center",
+			"color": "#9ca3af",
+			"value": "",
+			"font": { "size": 11, "weight": 500 }
 		}
 	]
 }

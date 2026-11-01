@@ -370,8 +370,8 @@ async fn renders_only_to_tracked_instances() {
     running.hub.untrack("b");
     let _provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
 
-    let (ids, state) = running.rendered.next(WITHIN).await;
-    assert_eq!(state, known(Profile::Balanced));
+    let (ids, snapshot) = running.rendered.next(WITHIN).await;
+    assert_eq!(snapshot.state, known(Profile::Balanced));
     assert_eq!(ids, vec!["a".to_string()]);
 }
 
@@ -390,4 +390,129 @@ async fn an_unchanged_profile_is_not_re_rendered() {
         .rendered
         .expect_quiet(Duration::from_millis(300))
         .await;
+}
+
+#[tokio::test]
+async fn renders_the_holder_while_a_hold_is_active() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    provider.set_holds(&[("gamemode", "balanced")]).await;
+    running
+        .rendered
+        .expect_status("Held by gamemode", WITHIN)
+        .await;
+}
+
+#[tokio::test]
+async fn renders_a_hold_that_existed_before_connecting() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "performance").await;
+    provider.preset_holds(&[("gamemode", "performance")]);
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect_where("held Performance", WITHIN, |s| {
+            s.state == known(Profile::Performance)
+                && crate::format::status_text(s) == "Held by gamemode"
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn clears_the_holder_when_the_hold_is_released() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    provider.preset_holds(&[("gamemode", "balanced")]);
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect_status("Held by gamemode", WITHIN)
+        .await;
+
+    provider.set_holds(&[]).await;
+    let (_, snapshot) = running.rendered.next(WITHIN).await;
+    assert_eq!(snapshot.state, known(Profile::Balanced));
+    assert!(snapshot.conditions.holds.is_empty(), "{snapshot:?}");
+}
+
+#[tokio::test]
+async fn a_step_during_a_hold_still_requests_the_next_profile() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    provider.preset_holds(&[("gamemode", "balanced")]);
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect_status("Held by gamemode", WITHIN)
+        .await;
+
+    running.hub.request(Request::Step(1)).await.unwrap();
+    assert_eq!(provider.profile(), "performance");
+    // The provider releases the hold on a Set; the line clears.
+    assert!(provider.holds().is_empty());
+    running
+        .rendered
+        .expect_where("Performance, no hold", WITHIN, |s| {
+            s.state == known(Profile::Performance) && s.conditions.holds.is_empty()
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn renders_the_degraded_reason_without_a_hold() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "performance").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+
+    provider.set_degraded("high-operating-temperature").await;
+    running
+        .rendered
+        .expect_status("Limited: too hot", WITHIN)
+        .await;
+}
+
+/// A provider without `ActiveProfileHolds`/`PerformanceDegraded` (or one
+/// whose reads fail) still shows its profile, with no status line.
+#[tokio::test]
+async fn failing_condition_reads_never_break_the_profile_display() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "power-saver").await;
+    provider.fail_condition_reads();
+    provider.preset_holds(&[("gamemode", "power-saver")]);
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect_where("plain Power Saver", WITHIN, |s| {
+            s.state == known(Profile::PowerSaver) && s.conditions.holds.is_empty()
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn losing_the_provider_clears_its_holds() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, Flavor::UPower, "balanced").await;
+    provider.preset_holds(&[("gamemode", "balanced")]);
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect_status("Held by gamemode", WITHIN)
+        .await;
+
+    provider.stop().await;
+    let (_, snapshot) = running.rendered.next(WITHIN).await;
+    assert_eq!(
+        snapshot,
+        crate::decision::Snapshot::plain(ProfileState::Unavailable)
+    );
 }

@@ -17,9 +17,9 @@ use tokio::sync::mpsc;
 use zbus::Connection;
 use zbus::names::InterfaceName;
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::Value;
+use zbus::zvariant::{OwnedValue, Value};
 
-use crate::decision::ProfileState;
+use crate::decision::{ProfileState, Snapshot};
 use crate::hub::{Connector, Renderer};
 
 /// Sends `log` records to stderr, which the test harness captures per test
@@ -162,9 +162,17 @@ impl Flavor {
     }
 }
 
+/// A fake hold: `(ApplicationId, Profile)`.
+pub type FakeHold = (String, String);
+
 #[derive(Default)]
 struct FakeState {
     profile: Mutex<String>,
+    holds: Mutex<Vec<FakeHold>>,
+    degraded: Mutex<String>,
+    /// Make reads of `ActiveProfileHolds` and `PerformanceDegraded` fail, as
+    /// on a provider that doesn't implement them.
+    fail_condition_reads: AtomicBool,
     /// Delay between accepting a Set and announcing it via PropertiesChanged.
     signal_delay: Mutex<Duration>,
     /// Delay before a Set call returns.
@@ -174,17 +182,56 @@ struct FakeState {
     flavor: OnceLock<Flavor>,
 }
 
-async fn announce(state: &FakeState, profile: &str) {
+fn holds_value(holds: &[FakeHold]) -> Vec<HashMap<String, OwnedValue>> {
+    holds
+        .iter()
+        .map(|(application_id, profile)| {
+            HashMap::from([
+                (
+                    "ApplicationId".to_string(),
+                    OwnedValue::from(zbus::zvariant::Str::from(application_id.clone())),
+                ),
+                (
+                    "Profile".to_string(),
+                    OwnedValue::from(zbus::zvariant::Str::from(profile.clone())),
+                ),
+                (
+                    "Reason".to_string(),
+                    OwnedValue::from(zbus::zvariant::Str::from("test")),
+                ),
+            ])
+        })
+        .collect()
+}
+
+async fn emit_changed(state: &FakeState, changed: HashMap<&str, Value<'_>>) {
     let flavor = *state.flavor.get().unwrap();
     let emitter = SignalEmitter::new(state.conn.get().unwrap(), flavor.path()).unwrap();
     zbus::fdo::Properties::properties_changed(
         &emitter,
         InterfaceName::try_from(flavor.name()).unwrap(),
-        HashMap::from([("ActiveProfile", Value::from(profile))]),
+        changed,
         Cow::Borrowed(&[]),
     )
     .await
     .unwrap();
+}
+
+async fn announce(state: &FakeState, profile: &str) {
+    emit_changed(
+        state,
+        HashMap::from([("ActiveProfile", Value::from(profile))]),
+    )
+    .await;
+}
+
+async fn announce_holds(state: &FakeState) {
+    let holds = holds_value(&state.holds.lock().unwrap());
+    emit_changed(
+        state,
+        HashMap::from([("ActiveProfileHolds", Value::from(holds))]),
+    )
+    .await;
 }
 
 async fn handle_set(state: &Arc<FakeState>, value: String) -> zbus::fdo::Result<()> {
@@ -196,11 +243,16 @@ async fn handle_set(state: &Arc<FakeState>, value: String) -> zbus::fdo::Result<
         ));
     }
     *state.profile.lock().unwrap() = value.clone();
+    // Like tuned-ppd: setting the profile releases every hold.
+    let released = !std::mem::take(&mut *state.holds.lock().unwrap()).is_empty();
     let signal_delay = *state.signal_delay.lock().unwrap();
     let state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(signal_delay).await;
         announce(&state, &value).await;
+        if released {
+            announce_holds(&state).await;
+        }
     });
     Ok(())
 }
@@ -219,6 +271,26 @@ macro_rules! fake_interface {
             #[zbus(property)]
             async fn set_active_profile(&mut self, value: String) -> zbus::fdo::Result<()> {
                 handle_set(&self.0, value).await
+            }
+
+            #[zbus(property(emits_changed_signal = "false"))]
+            fn active_profile_holds(&self) -> zbus::fdo::Result<Vec<HashMap<String, OwnedValue>>> {
+                if self.0.fail_condition_reads.load(Ordering::SeqCst) {
+                    return Err(zbus::fdo::Error::UnknownProperty(
+                        "ActiveProfileHolds".into(),
+                    ));
+                }
+                Ok(holds_value(&self.0.holds.lock().unwrap()))
+            }
+
+            #[zbus(property(emits_changed_signal = "false"))]
+            fn performance_degraded(&self) -> zbus::fdo::Result<String> {
+                if self.0.fail_condition_reads.load(Ordering::SeqCst) {
+                    return Err(zbus::fdo::Error::UnknownProperty(
+                        "PerformanceDegraded".into(),
+                    ));
+                }
+                Ok(self.0.degraded.lock().unwrap().clone())
             }
         }
     };
@@ -255,6 +327,46 @@ impl FakeProvider {
         announce(&self.state, profile).await;
     }
 
+    /// Simulates applications taking or releasing holds (`HoldProfile` /
+    /// `ReleaseProfile`): replaces the holds and announces them.
+    pub async fn set_holds(&self, holds: &[(&str, &str)]) {
+        *self.state.holds.lock().unwrap() = holds
+            .iter()
+            .map(|(app, profile)| (app.to_string(), profile.to_string()))
+            .collect();
+        announce_holds(&self.state).await;
+    }
+
+    /// Sets `PerformanceDegraded` and announces it.
+    pub async fn set_degraded(&self, reason: &str) {
+        *self.state.degraded.lock().unwrap() = reason.to_string();
+        emit_changed(
+            &self.state,
+            HashMap::from([("PerformanceDegraded", Value::from(reason))]),
+        )
+        .await;
+    }
+
+    /// Sets holds without announcing them, as if they existed before the
+    /// plugin connected.
+    pub fn preset_holds(&self, holds: &[(&str, &str)]) {
+        *self.state.holds.lock().unwrap() = holds
+            .iter()
+            .map(|(app, profile)| (app.to_string(), profile.to_string()))
+            .collect();
+    }
+
+    /// Makes the holds and degraded reads fail, like a provider without them.
+    pub fn fail_condition_reads(&self) {
+        self.state
+            .fail_condition_reads
+            .store(true, Ordering::SeqCst);
+    }
+
+    pub fn holds(&self) -> Vec<FakeHold> {
+        self.state.holds.lock().unwrap().clone()
+    }
+
     pub fn profile(&self) -> String {
         self.state.profile.lock().unwrap().clone()
     }
@@ -279,17 +391,17 @@ impl FakeProvider {
     }
 }
 
-/// A renderer that records every state the hub pushes.
-pub struct RecordingRenderer(mpsc::UnboundedSender<(Vec<String>, ProfileState)>);
+/// A renderer that records every snapshot the hub pushes.
+pub struct RecordingRenderer(mpsc::UnboundedSender<(Vec<String>, Snapshot)>);
 
 #[async_trait]
 impl Renderer for RecordingRenderer {
-    async fn render_all(&self, instance_ids: &[String], state: ProfileState) {
-        let _ = self.0.send((instance_ids.to_vec(), state));
+    async fn render_all(&self, instance_ids: &[String], snapshot: &Snapshot) {
+        let _ = self.0.send((instance_ids.to_vec(), snapshot.clone()));
     }
 }
 
-pub struct Rendered(mpsc::UnboundedReceiver<(Vec<String>, ProfileState)>);
+pub struct Rendered(mpsc::UnboundedReceiver<(Vec<String>, Snapshot)>);
 
 pub fn recording_renderer() -> (Arc<RecordingRenderer>, Rendered) {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -299,20 +411,39 @@ pub fn recording_renderer() -> (Arc<RecordingRenderer>, Rendered) {
 impl Rendered {
     /// Waits until the hub renders `want`, failing if it doesn't within `within`.
     pub async fn expect(&mut self, want: ProfileState, within: Duration) {
+        self.expect_where(&format!("{want:?}"), within, |s| s.state == want)
+            .await;
+    }
+
+    /// Waits until the hub renders a snapshot whose status line is `want`.
+    pub async fn expect_status(&mut self, want: &str, within: Duration) {
+        self.expect_where(&format!("status {want:?}"), within, |s| {
+            crate::format::status_text(s) == want
+        })
+        .await;
+    }
+
+    /// Waits until the hub renders a snapshot matching `matches`.
+    pub async fn expect_where(
+        &mut self,
+        what: &str,
+        within: Duration,
+        matches: impl Fn(&Snapshot) -> bool,
+    ) {
         let mut seen = Vec::new();
         let deadline = tokio::time::Instant::now() + within;
         loop {
             match tokio::time::timeout_at(deadline, self.0.recv()).await {
-                Ok(Some((_, state))) if state == want => return,
-                Ok(Some((_, state))) => seen.push(state),
-                Ok(None) => panic!("renderer dropped while waiting for {want:?}"),
-                Err(_) => panic!("{want:?} not rendered within {within:?}; rendered {seen:?}"),
+                Ok(Some((_, snapshot))) if matches(&snapshot) => return,
+                Ok(Some((_, snapshot))) => seen.push(snapshot),
+                Ok(None) => panic!("renderer dropped while waiting for {what}"),
+                Err(_) => panic!("{what} not rendered within {within:?}; rendered {seen:?}"),
             }
         }
     }
 
     /// The next render, with the instance ids it went to.
-    pub async fn next(&mut self, within: Duration) -> (Vec<String>, ProfileState) {
+    pub async fn next(&mut self, within: Duration) -> (Vec<String>, Snapshot) {
         tokio::time::timeout(within, self.0.recv())
             .await
             .expect("nothing rendered in time")
