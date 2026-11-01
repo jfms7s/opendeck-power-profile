@@ -328,6 +328,55 @@ async fn a_rejected_set_is_reported_and_changes_nothing() {
         .await;
 }
 
+/// A rejected Set must not stay the stepping base: the next rotation steps
+/// from the confirmed profile, not from the profile that was never set.
+#[tokio::test]
+async fn a_failed_set_clears_the_pending_profile() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "balanced").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::Balanced), WITHIN)
+        .await;
+
+    provider.reject_sets();
+    assert!(matches!(
+        running.hub.request(Request::Step(1)).await,
+        Err(RequestError::Dbus(_))
+    ));
+    provider.accept_sets();
+    running.hub.request(Request::Step(-1)).await.unwrap();
+    // Stepping down from the failed Performance would land on Balanced.
+    assert_eq!(provider.profile(), "power-saver");
+}
+
+/// An external change while a request is still unconfirmed replaces the
+/// stepping base: the next rotation steps from what the provider now says.
+#[tokio::test]
+async fn an_external_change_after_a_request_resets_the_base() {
+    let bus = PrivateBus::start();
+    let provider = FakeProvider::start(&bus, "power-saver").await;
+    let mut running = start_hub(&bus, &["dial"]);
+    running
+        .rendered
+        .expect(known(Profile::PowerSaver), WITHIN)
+        .await;
+
+    // Keep the request for Balanced unconfirmed while the external change lands.
+    provider.delay_signals_by(WITHIN);
+    running.hub.request(Request::Step(1)).await.unwrap();
+    provider.change_externally("performance").await;
+    running
+        .rendered
+        .expect(known(Profile::Performance), WITHIN)
+        .await;
+
+    running.hub.request(Request::Step(-1)).await.unwrap();
+    // Stepping down from the stale in-flight Balanced would land on Power Saver.
+    assert_eq!(provider.profile(), "balanced");
+}
+
 #[tokio::test]
 async fn pressing_resets_to_balanced() {
     let bus = PrivateBus::start();
