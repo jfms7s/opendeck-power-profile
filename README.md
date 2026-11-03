@@ -30,9 +30,16 @@ name, which tuned-ppd and power-profiles-daemon 0.20 and later export.
   several do), or, with no hold, why performance is limited (`Limited: lap detected` /
   `Limited: too hot`). Turning the dial during a hold still steps as usual; the provider
   then releases the hold and the line clears.
+- With no hold and nothing limiting performance, the same line shows the CPU temperature
+  (e.g. `42 °C`, from the `k10temp`, `zenpower` or `coretemp` sensor in
+  `/sys/class/hwmon`). It is the one thing the plugin polls: every 5 seconds, and only
+  while a Power Profile dial or key is on screen (keys don't show it). Without a readable
+  sensor the line stays empty and the plugin log says so once. It is empty while the
+  provider is unavailable.
 - The touch strip updates live even when the profile changes from somewhere else (a
   desktop applet, another key, `powerprofilesctl` in a terminal) - it subscribes to the
-  provider's D-Bus change notifications rather than polling.
+  provider's D-Bus change notifications rather than polling (only the temperature above
+  is polled).
 - **Cooling follows the profile** when [OpenLinkHub](https://github.com/jurkovic-nikola/OpenLinkHub)
   runs on this machine (its API on `127.0.0.1:27003`): after the provider confirms a change
   from one profile to another, from the dial or from anywhere else, fan channels whose
@@ -117,6 +124,10 @@ link.
       (needs PyGObject, which tuned-ppd already pulls in). The dial moves to Performance
       and shows "Held by smoke-app"; Ctrl+C releases the hold and the line clears. Run it
       again and turn the dial instead: it steps as usual and the line clears.
+- [ ] With no hold active, the line under the gauge shows the CPU temperature (compare
+      `sensors` or `cat /sys/class/hwmon/hwmon*/temp1_input`), and it follows a load
+      change (e.g. `stress-ng --cpu 0 -t 30s`) within about 5 seconds. During a hold the
+      line names the holder instead, and the temperature comes back when the hold ends.
 - [ ] With OpenLinkHub running and a fan channel on `Quiet`, `Normal` or `Performance`:
       turning the dial to Performance switches that channel to `Performance` within a
       second (OpenLinkHub's page shows it, and the plugin log has a `cooling sync:` line);

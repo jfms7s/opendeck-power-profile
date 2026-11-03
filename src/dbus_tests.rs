@@ -703,7 +703,7 @@ async fn renders_a_hold_that_existed_before_connecting() {
         .rendered
         .expect_where("held Performance", WITHIN, |s| {
             s.state == known(Profile::Performance)
-                && crate::format::status_text(s) == "Held by gamemode"
+                && crate::format::status_text(s, None) == "Held by gamemode"
         })
         .await;
 }

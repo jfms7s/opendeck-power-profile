@@ -17,6 +17,11 @@ impl Instances {
         self.lock().remove(instance_id);
     }
 
+    /// Whether nothing is on screen.
+    pub fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
     /// The tracked instance IDs, sorted.
     pub fn ids(&self) -> Vec<String> {
         self.lock().iter().cloned().collect()
@@ -45,5 +50,8 @@ mod tests {
         instances.untrack("b");
         instances.untrack("missing");
         assert_eq!(instances.ids(), ["a"]);
+        assert!(!instances.is_empty());
+        instances.untrack("a");
+        assert!(instances.is_empty());
     }
 }

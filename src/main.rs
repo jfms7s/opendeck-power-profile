@@ -8,6 +8,7 @@ mod hub;
 mod icons;
 mod instances;
 mod power_profiles;
+mod telemetry;
 #[cfg(test)]
 mod test_support;
 
@@ -19,6 +20,7 @@ use cooling::{CoolingSync, OPENLINKHUB_ADDR, OpenLinkHub, REQUEST_TIMEOUT};
 use hub::{Connector, HubConfig, ProfileHub};
 use instances::Instances;
 use openaction::{OpenActionResult, register_action, run};
+use telemetry::{HWMON_ROOT, POLL_INTERVAL, Telemetry};
 
 /// How long to wait before reconnecting after the provider is lost or a
 /// connect attempt fails.
@@ -51,8 +53,19 @@ async fn main() -> OpenActionResult<()> {
     // Switches OpenLinkHub's fan channels along with the profile, when it runs.
     let cooling = CoolingSync::start(OpenLinkHub::new(OPENLINKHUB_ADDR, REQUEST_TIMEOUT));
     let instances = Arc::new(Instances::default());
+    let telemetry = Arc::new(Telemetry::default());
+    let renderer = Arc::new(OpenDeckRenderer::new(instances.clone(), telemetry.clone()));
+    // The CPU temperature on the status line, read only while an instance
+    // is on screen. Its own task: a sensor problem never reaches the profile.
+    tokio::spawn(telemetry::poll(
+        instances.clone(),
+        telemetry.clone(),
+        renderer.clone(),
+        || telemetry::read_cpu_temperature(std::path::Path::new(HWMON_ROOT)),
+        POLL_INTERVAL,
+    ));
     let hub = ProfileHub::new(
-        Arc::new(OpenDeckRenderer::new(instances.clone())),
+        renderer,
         vec![Arc::new(cooling)],
         HubConfig {
             retry_interval: RETRY_INTERVAL,
@@ -69,7 +82,7 @@ async fn main() -> OpenActionResult<()> {
     });
     tokio::spawn(hub.clone().run_supervised(connector));
 
-    register_action(PowerProfileAction::new(hub, instances)).await;
+    register_action(PowerProfileAction::new(hub, instances, telemetry)).await;
     run(std::env::args().collect()).await
 }
 

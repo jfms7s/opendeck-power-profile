@@ -49,9 +49,11 @@ fn shorten(text: &str, max: usize) -> String {
 }
 
 /// The line under the gauge: who holds the profile, else why performance is
-/// degraded, else nothing. With several holds it names the one that asked
-/// for the active profile (the effective one) and counts the rest.
-pub fn status_text(snapshot: &Snapshot) -> String {
+/// degraded, else the CPU temperature (`telemetry`), else nothing. With
+/// several holds it names the one that asked for the active profile (the
+/// effective one) and counts the rest. Empty while the provider is
+/// unavailable: a dimmed dial shows nothing live.
+pub fn status_text(snapshot: &Snapshot, telemetry: Option<&str>) -> String {
     if snapshot.state == ProfileState::Unavailable {
         return String::new();
     }
@@ -75,7 +77,7 @@ pub fn status_text(snapshot: &Snapshot) -> String {
         };
     }
     match snapshot.conditions.degraded.as_str() {
-        "" => String::new(),
+        "" => telemetry.unwrap_or_default().to_string(),
         "lap-detected" => "Limited: lap detected".to_string(),
         "high-operating-temperature" => "Limited: too hot".to_string(),
         other => format!(
@@ -92,9 +94,9 @@ pub fn status_text(snapshot: &Snapshot) -> String {
 /// The side icons hint at what rotating does - the leaf towards Power Saver,
 /// the bolt towards Performance - and dim when rotating that way would do
 /// nothing (`decision::can_step`), including towards a profile the provider
-/// doesn't offer. Holds and degradation only add the status
-/// line; they never change the name, gauge or hints.
-pub fn feedback_for(snapshot: &Snapshot) -> Value {
+/// doesn't offer. Holds, degradation and the temperature only fill the
+/// status line; they never change the name, gauge or hints.
+pub fn feedback_for(snapshot: &Snapshot, telemetry: Option<&str>) -> Value {
     let state = snapshot.state;
     let (name, gauge) = match state {
         ProfileState::Known(profile) => {
@@ -113,8 +115,14 @@ pub fn feedback_for(snapshot: &Snapshot) -> Value {
         "left": icons::leaf(can_step(state, -1, snapshot.available)),
         "gauge": gauge,
         "right": icons::bolt(can_step(state, 1, snapshot.available)),
-        "status": status_text(snapshot),
+        "status": status_text(snapshot, telemetry),
     })
+}
+
+/// The `setFeedback` payload for a new temperature reading: the status line
+/// alone (`setFeedback` merges keys, so the rest of the strip stays).
+pub fn status_feedback(snapshot: &Snapshot, telemetry: Option<&str>) -> Value {
+    json!({ "status": status_text(snapshot, telemetry) })
 }
 
 /// A key's title: the profile's name, "Unknown" or "Unavailable".
@@ -217,7 +225,7 @@ mod tests {
     }
 
     fn feedback_for_state(state: ProfileState) -> Value {
-        feedback_for(&Snapshot::plain(state))
+        feedback_for(&Snapshot::plain(state), None)
     }
 
     fn is_dimmed(svg: &Value) -> bool {
@@ -256,7 +264,7 @@ mod tests {
             available: Available::from_names(["power-saver", "balanced"]).unwrap(),
             ..Snapshot::plain(ProfileState::Known(Profile::Balanced))
         };
-        let f = feedback_for(&snapshot);
+        let f = feedback_for(&snapshot, None);
         assert!(!is_dimmed(&f["left"]) && is_dimmed(&f["right"]));
     }
 
@@ -287,9 +295,9 @@ mod tests {
     fn a_hold_names_its_holder() {
         let balanced = ProfileState::Known(Profile::Balanced);
         let s = with(balanced, vec![hold("gamemode", "balanced")], "");
-        assert_eq!(feedback_for(&s)["status"], "Held by gamemode");
+        assert_eq!(feedback_for(&s, None)["status"], "Held by gamemode");
         let s = with(balanced, vec![hold("", "balanced")], "");
-        assert_eq!(status_text(&s), "Held by an app");
+        assert_eq!(status_text(&s, None), "Held by an app");
     }
 
     #[test]
@@ -301,12 +309,12 @@ mod tests {
             hold("other", "performance"),
         ];
         assert_eq!(
-            status_text(&with(saver, holds.clone(), "")),
+            status_text(&with(saver, holds.clone(), ""), None),
             "Held by battery-widget +2"
         );
         // No hold matches the active profile: the first one is named.
         assert_eq!(
-            status_text(&with(ProfileState::Unknown, holds, "")),
+            status_text(&with(ProfileState::Unknown, holds, ""), None),
             "Held by game +2"
         );
     }
@@ -318,7 +326,7 @@ mod tests {
             vec![hold("com.feralinteractive.GameMode", "performance")],
             "",
         );
-        assert_eq!(status_text(&s), "Held by com.feralinteractiv…");
+        assert_eq!(status_text(&s, None), "Held by com.feralinteractiv…");
     }
 
     #[test]
@@ -329,17 +337,20 @@ mod tests {
             ("high-operating-temperature", "Limited: too hot"),
             ("something-new", "Limited: something new"),
         ] {
-            assert_eq!(status_text(&with(balanced, vec![], reason)), text);
+            assert_eq!(status_text(&with(balanced, vec![], reason), None), text);
         }
         let held = with(balanced, vec![hold("game", "balanced")], "lap-detected");
-        assert_eq!(status_text(&held), "Held by game");
+        assert_eq!(status_text(&held, None), "Held by game");
     }
 
     #[test]
     fn conditions_never_change_the_name_gauge_or_hints() {
         for state in ALL_STATES {
             let plain = feedback_for_state(state);
-            let held = feedback_for(&with(state, vec![hold("g", "performance")], "lap-detected"));
+            let held = feedback_for(
+                &with(state, vec![hold("g", "performance")], "lap-detected"),
+                Some("42 °C"),
+            );
             for key in ["name", "left", "gauge", "right"] {
                 assert_eq!(plain[key], held[key], "{key} for {state:?}");
             }
@@ -353,7 +364,40 @@ mod tests {
             vec![hold("g", "balanced")],
             "lap-detected",
         );
-        assert_eq!(status_text(&s), "");
+        assert_eq!(status_text(&s, None), "");
+    }
+
+    #[test]
+    fn the_temperature_shows_only_when_nothing_else_claims_the_line() {
+        let balanced = ProfileState::Known(Profile::Balanced);
+        let temp = Some("42 °C");
+        for state in [balanced, ProfileState::Unknown] {
+            assert_eq!(status_text(&Snapshot::plain(state), temp), "42 °C");
+        }
+        let held = with(balanced, vec![hold("game", "balanced")], "");
+        assert_eq!(status_text(&held, temp), "Held by game");
+        let limited = with(balanced, vec![], "lap-detected");
+        assert_eq!(status_text(&limited, temp), "Limited: lap detected");
+        let unavailable = Snapshot::plain(ProfileState::Unavailable);
+        assert_eq!(status_text(&unavailable, temp), "");
+    }
+
+    /// A temperature tick sends the status line alone, the same text a full
+    /// render would put there.
+    #[test]
+    fn a_status_update_carries_only_the_status_line() {
+        for snapshot in all_snapshots() {
+            for telemetry in [None, Some("42 °C")] {
+                let update = status_feedback(&snapshot, telemetry);
+                let keys: Vec<&String> = update.as_object().unwrap().keys().collect();
+                assert_eq!(keys, ["status"], "{snapshot:?}");
+                assert_eq!(
+                    update["status"],
+                    feedback_for(&snapshot, telemetry)["status"],
+                    "{snapshot:?} {telemetry:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -366,8 +410,11 @@ mod tests {
             .iter()
             .map(|i| i["key"].as_str().unwrap())
             .collect();
-        for snapshot in all_snapshots() {
-            let feedback = feedback_for(&snapshot);
+        for (snapshot, telemetry) in all_snapshots()
+            .into_iter()
+            .flat_map(|snapshot| [(snapshot.clone(), None), (snapshot, Some("42 °C"))])
+        {
+            let feedback = feedback_for(&snapshot, telemetry);
             let feedback_keys: BTreeSet<&str> = feedback
                 .as_object()
                 .unwrap()
@@ -385,7 +432,7 @@ mod tests {
     fn every_pixmap_in_every_state_is_well_formed_svg() {
         for snapshot in all_snapshots() {
             let state = &snapshot;
-            let feedback = feedback_for(state);
+            let feedback = feedback_for(state, Some("42 °C"));
             for key in ["left", "gauge", "right"] {
                 let svg = feedback[key].as_str().unwrap();
                 let doc = roxmltree::Document::parse(svg)

@@ -550,7 +550,7 @@ impl Rendered {
     /// Waits until the hub renders a snapshot whose status line is `want`.
     pub async fn expect_status(&mut self, want: &str, within: Duration) {
         self.expect_where(&format!("status {want:?}"), within, |s| {
-            crate::format::status_text(s) == want
+            crate::format::status_text(s, None) == want
         })
         .await;
     }
