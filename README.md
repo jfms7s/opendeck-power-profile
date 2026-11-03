@@ -138,14 +138,14 @@ link.
 
 The tests start their own private `dbus-daemon` (package `dbus-daemon` or `dbus`), so they
 need that binary installed but never touch the system bus or the active profile. CI's `test`
-job runs the first three lines (the tests under coverage); CI also runs the MSRV check and
-the advisory scan below. The rest is the local install loop:
+job runs the first three lines (the tests under coverage); CI also runs the advisory scan
+below. CI builds with one pinned toolchain (`RUST_TOOLCHAIN` in `ci.yml`), and the crate
+declares no older minimum. The rest is the local install loop:
 
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
-# cargo +1.89 check --all-targets --locked   # MSRV (CI's msrv job)
 # cargo deny check advisories                # needs cargo-deny (CI's advisories workflow)
 cargo build --release --locked
 node build.mjs                               # assembles dist/<uuid>.sdPlugin for this host

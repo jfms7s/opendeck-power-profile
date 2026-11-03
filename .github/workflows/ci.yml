@@ -10,8 +10,6 @@ permissions: {}
 env:
   # Bump deliberately (fmt/clippy results can change between releases).
   RUST_TOOLCHAIN: "1.98.1"
-  # Keep in step with `rust-version` in Cargo.toml.
-  RUST_MSRV: "1.89.0"
 
 jobs:
   test:
@@ -77,20 +75,6 @@ jobs:
       # The Release workflow builds the draft's notes from the README's smoke
       # checklist markers; catch a broken marker here, not on a pushed tag.
       - run: node scripts/release-body.mjs > /dev/null
-
-  msrv:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
-        with:
-          toolchain: ${{ env.RUST_MSRV }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo check --all-targets --locked
 
   # eng-metrics-lab (report-only): duplication, complexity and dead code; the collector picks up the artifact.
   quality:
