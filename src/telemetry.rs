@@ -51,7 +51,7 @@ fn find_cpu_input(root: &Path) -> Option<PathBuf> {
             if name.trim() != driver {
                 continue;
             }
-            if let Some(input) = labelled_input(device, labels) {
+            if let Some(input) = labelled_input(device, labels).filter(|input| input.is_file()) {
                 return Some(input);
             }
             let first = device.join("temp1_input");
@@ -101,14 +101,18 @@ pub fn format_millidegrees(text: &str) -> Option<String> {
 }
 
 /// The latest reading, shared by the poller (writes) and the renderer
-/// (reads). Logs once when the sensor goes missing and once when it is back,
-/// never on every poll.
+/// (reads). Logs the first time the sensor can't be read, at Info, and
+/// every later change between readable and unreadable only at Debug, so a
+/// flapping sensor never fills the log.
 #[derive(Debug, Default)]
 pub struct Telemetry(Mutex<Latest>);
 
 #[derive(Debug, Default)]
 struct Latest {
     reading: Option<String>,
+    /// Whether the last read failed.
+    missing: bool,
+    /// Whether a failed read was ever logged at Info.
     missing_logged: bool,
 }
 
@@ -122,17 +126,14 @@ impl Telemetry {
     /// (whether to redraw).
     fn record(&self, reading: Option<String>) -> bool {
         let mut latest = self.lock();
-        match (&reading, latest.missing_logged) {
-            (None, false) => {
-                log::info!("no readable CPU temperature sensor; the status line stays empty");
-                latest.missing_logged = true;
-            }
-            (Some(_), true) => {
-                log::info!("CPU temperature sensor readable again");
-                latest.missing_logged = false;
-            }
-            _ => {}
+        let missing = reading.is_none();
+        if missing && !latest.missing_logged {
+            log::info!("no readable CPU temperature sensor; the status line stays empty");
+            latest.missing_logged = true;
+        } else if missing != latest.missing {
+            log::debug!("CPU temperature sensor readable: {}", !missing);
         }
+        latest.missing = missing;
         let changed = latest.reading != reading;
         latest.reading = reading;
         changed
@@ -277,6 +278,19 @@ mod tests {
             &[("name", "k10temp\n"), ("temp1_label", "Tctl\n")],
         )]);
         assert_eq!(read_cpu_temperature(dangling.path()), None);
+    }
+
+    #[test]
+    fn a_labelled_input_that_is_missing_falls_back_to_temp1() {
+        let root = hwmon(&[(
+            "hwmon1",
+            &[
+                ("name", "k10temp\n"),
+                ("temp1_input", "47000\n"),
+                ("temp2_label", "Tctl\n"),
+            ],
+        )]);
+        assert_eq!(read_cpu_temperature(root.path()).as_deref(), Some("47 °C"));
     }
 
     #[test]
