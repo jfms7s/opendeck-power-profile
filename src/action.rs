@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::decision::{Request, Snapshot, is_long_press};
-use crate::format::{feedback_for, tile_image_for, title_for};
+use crate::decision::{Available, Conditions, ProfileState, Request, Snapshot, is_long_press};
+use crate::format::{feedback_for, status_feedback, tile_image_for, title_for};
 use crate::hub::{ProfileHub, Renderer, RequestError};
 use crate::instances::Instances;
+use crate::telemetry::{Telemetry, TelemetrySink};
 use async_trait::async_trait;
 use openaction::{Action, Instance, OpenActionResult};
 use serde::{Deserialize, Serialize};
@@ -16,41 +17,97 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PowerProfileSettings {}
 
-/// Draws `snapshot` on one instance. The only place anything is drawn: the
-/// renderer calls it for every change, `will_appear` for a new instance. A
-/// dial gets the touch-strip layout; a key gets the profile's glyph as its
+fn is_key(instance: &Instance) -> bool {
+    instance.controller == "Keypad"
+}
+
+/// Draws `snapshot` on one instance. The only place a whole instance is
+/// drawn: the renderer calls it for every change, `will_appear` for a new
+/// instance. A dial gets the touch-strip layout (with the CPU temperature,
+/// `telemetry`, on its status line); a key gets the profile's glyph as its
 /// image and the profile's name as its title.
-async fn draw(instance: &Instance, snapshot: &Snapshot) -> OpenActionResult<()> {
-    if instance.controller == "Keypad" {
+async fn draw(
+    instance: &Instance,
+    snapshot: &Snapshot,
+    telemetry: Option<&str>,
+) -> OpenActionResult<()> {
+    if is_key(instance) {
         instance
             .set_image(Some(tile_image_for(snapshot)), None)
             .await?;
         instance.set_title(Some(title_for(snapshot)), None).await
     } else {
-        instance.set_feedback(&feedback_for(snapshot)).await
+        instance
+            .set_feedback(&feedback_for(snapshot, telemetry))
+            .await
     }
 }
 
-/// Renders hub state changes onto every tracked OpenDeck instance.
+/// Renders hub state changes, and new temperature readings, onto every
+/// tracked OpenDeck instance.
 pub struct OpenDeckRenderer {
     instances: Arc<Instances>,
+    telemetry: Arc<Telemetry>,
+    /// The snapshot last rendered. Held across the draws so a temperature
+    /// update and a state render never interleave: an update drawn between
+    /// a render's reads and its writes could put the temperature over a
+    /// "Held by" line that just arrived.
+    shown: tokio::sync::Mutex<Snapshot>,
 }
 
 impl OpenDeckRenderer {
-    pub fn new(instances: Arc<Instances>) -> Self {
-        Self { instances }
+    pub fn new(instances: Arc<Instances>, telemetry: Arc<Telemetry>) -> Self {
+        Self {
+            instances,
+            telemetry,
+            // The hub's own starting view; it renders every change from it.
+            shown: tokio::sync::Mutex::new(Snapshot {
+                state: ProfileState::Unavailable,
+                conditions: Conditions::default(),
+                available: Available::ALL,
+            }),
+        }
+    }
+
+    /// The tracked instances that still exist.
+    async fn on_screen(&self) -> Vec<Arc<Instance>> {
+        let mut found = Vec::new();
+        for instance_id in self.instances.ids() {
+            // None: disappeared since the IDs were read.
+            if let Some(instance) = openaction::get_instance(instance_id).await {
+                found.push(instance);
+            }
+        }
+        found
     }
 }
 
 #[async_trait]
 impl Renderer for OpenDeckRenderer {
     async fn render(&self, snapshot: &Snapshot) {
-        for instance_id in self.instances.ids() {
-            let Some(instance) = openaction::get_instance(instance_id.clone()).await else {
-                continue; // disappeared since the IDs were read
-            };
-            if let Err(e) = draw(&instance, snapshot).await {
-                log::warn!("render to {instance_id} failed: {e}");
+        let mut shown = self.shown.lock().await;
+        *shown = snapshot.clone();
+        let telemetry = self.telemetry.latest();
+        for instance in self.on_screen().await {
+            if let Err(e) = draw(&instance, snapshot, telemetry.as_deref()).await {
+                log::warn!("render to {} failed: {e}", instance.instance_id);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl TelemetrySink for OpenDeckRenderer {
+    /// Redraws the dials' status line only; keys show no temperature.
+    async fn telemetry_changed(&self) {
+        let shown = self.shown.lock().await;
+        let update = status_feedback(&shown, self.telemetry.latest().as_deref());
+        for instance in self.on_screen().await {
+            if is_key(&instance) {
+                continue;
+            }
+            if let Err(e) = instance.set_feedback(&update).await {
+                log::warn!("status update to {} failed: {e}", instance.instance_id);
             }
         }
     }
@@ -61,16 +118,18 @@ impl Renderer for OpenDeckRenderer {
 pub struct PowerProfileAction {
     hub: ProfileHub,
     instances: Arc<Instances>,
+    telemetry: Arc<Telemetry>,
     /// When each key instance went down, to tell a press from a long press
     /// on release.
     key_downs: Mutex<HashMap<String, Instant>>,
 }
 
 impl PowerProfileAction {
-    pub fn new(hub: ProfileHub, instances: Arc<Instances>) -> Self {
+    pub fn new(hub: ProfileHub, instances: Arc<Instances>, telemetry: Arc<Telemetry>) -> Self {
         Self {
             hub,
             instances,
+            telemetry,
             key_downs: Mutex::new(HashMap::new()),
         }
     }
@@ -107,7 +166,8 @@ impl Action for PowerProfileAction {
     ) -> OpenActionResult<()> {
         // Track first: a change from here on is rendered to it as well.
         self.instances.track(&instance.instance_id);
-        draw(instance, &self.hub.snapshot()).await
+        let telemetry = self.telemetry.latest();
+        draw(instance, &self.hub.snapshot(), telemetry.as_deref()).await
     }
 
     async fn will_disappear(
