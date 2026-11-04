@@ -1,96 +1,29 @@
 name: CI
+# Replaces the in-repo ci.yml jobs and advisories.yml (delete that file: its weekly
+# schedule and the advisory scan live here now). Scheduled runs only run `audit`.
 on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
-# Every job states what it needs; nothing gets a write token.
 permissions: {}
 
-env:
-  # Bump deliberately (fmt/clippy results can change between releases).
-  RUST_TOOLCHAIN: "1.98.1"
-
 jobs:
-  test:
-    runs-on: ubuntu-24.04
+  # Reports the checks as `ci / <job>`: those are the names for the
+  # "Protect master" ruleset (see opendeck-plugin-ci's README).
+  ci:
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt, clippy, llvm-tools-preview
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Install dbus-daemon (the D-Bus tests run a private bus)
-        run: command -v dbus-daemon || { sudo apt-get update && sudo apt-get install -y dbus-daemon; }
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
-        with:
-          tool: cargo-llvm-cov@0.9.1
-      # Replaces `cargo test`: the same tests, instrumented. The fragment waits in
-      # RUNNER_TEMP until every test in the job has passed (see the collect step).
-      - name: Test with coverage (eng-metrics-lab)
-        run: cargo llvm-cov --locked --lcov --output-path "$RUNNER_TEMP/coverage-rust.lcov"
-      # Only reached when every step above passed, so a red test leaves no fragment.
-      - name: Collect coverage fragment (eng-metrics-lab)
-        run: |
-          mkdir -p .quality
-          mv "$RUNNER_TEMP/coverage-rust.lcov" .quality/coverage-rust.lcov
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-fragments
-          path: .quality/coverage-rust.lcov
-          include-hidden-files: true
-          retention-days: 7
-
-  # Builds and packages the way release.yml does, so a packaging break shows up
-  # on the pull request rather than when a tag is pushed - but without LTO,
-  # which only the release builds (never cached) pay for.
-  package:
-    runs-on: ubuntu-24.04
-    env:
-      CARGO_PROFILE_RELEASE_LTO: "off"
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1 (2026-10-01)
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: x86_64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build --release --locked --target x86_64-unknown-linux-gnu
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-      - run: node build.mjs --release x86_64-unknown-linux-gnu
-      # The Release workflow builds the draft's notes from the README's smoke
-      # checklist markers; catch a broken marker here, not on a pushed tag.
-      - run: node scripts/release-body.mjs > /dev/null
-
-  # eng-metrics-lab (report-only): duplication, complexity and dead code; the collector picks up the artifact.
-  quality:
-    needs: [test]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    permissions: {contents: read, packages: read}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: coverage-fragments
-          path: .quality
-        continue-on-error: true
-      - name: Code quality (report-only)
-        uses: jfms7s/eng-metrics-lab/action@v0
-        continue-on-error: true
+      packages: read # the report-only eng-metrics-lab job
+    uses: jfms7s/opendeck-plugin-ci/.github/workflows/ci.yml@098bfd0f9d891c2db4f26cd95627e6e6a567563a # v0.1.0
+    with:
+      # The jobs the ruleset requires: fails if an input above switches one off (skipped counts as green).
+      required-jobs: "test bundle"
+      apt-packages: "dbus-daemon"
+      macos: false
+      bundle-lto: "off"
+      release-notes-check: true
+      audit: "cargo-deny"
