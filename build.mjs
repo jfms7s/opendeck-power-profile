@@ -100,11 +100,15 @@ for (const uuid of actionUuids) {
 	if (!uuid.startsWith(`${pluginUuid}.`)) fail(`action ${uuid} is not under plugin ${pluginUuid}`);
 }
 
-// Every literal `const UUID: &str = "<plugin uuid>.<action>"` in src/ must be
-// an action the manifest declares (other UUIDs, e.g. a test double's, are
-// ignored). Tolerates rustfmt/clippy reformatting (`&str` vs
-// `&'static str`, spacing); a UUID computed rather than written as a literal is
-// not seen, and the Rust tests that read manifest.json remain the authority.
+// Every literal `const UUID: &str = "..."` in src/ that looks like one of this
+// project family's UUIDs (it starts with the family prefix, the first two
+// segments of the plugin UUID, e.g. `com.jfms7s.`) must be an action the
+// manifest declares. That catches a typo in the plugin segment
+// (`com.jfms7s.weatherr.airquality`) as well as an action missing from the
+// manifest. UUIDs outside the family (a test double's `test.echo`) are
+// ignored. Tolerates rustfmt/clippy reformatting (`&str` vs `&'static str`,
+// spacing); a UUID computed rather than written as a literal is not seen, and
+// the Rust tests that read manifest.json remain the authority.
 function rustFiles(dir) {
 	if (!existsSync(dir)) return [];
 	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -113,10 +117,13 @@ function rustFiles(dir) {
 		return entry.name.endsWith(".rs") ? [path] : [];
 	});
 }
+const familyPrefix = `${pluginUuid.split(".").slice(0, 2).join(".").toLowerCase()}.`;
 const uuidConst = /const\s+UUID\s*:\s*&\s*(?:'static\s+)?str\s*=\s*"([^"]+)"/g;
 for (const file of rustFiles("src")) {
 	for (const [, uuid] of readFileSync(file, "utf8").matchAll(uuidConst)) {
-		if (uuid.startsWith(`${pluginUuid}.`) && !actionUuids.includes(uuid)) fail(`action UUID mismatch: ${file} has ${uuid}, which assets/manifest.json does not declare`);
+		if (!uuid.toLowerCase().startsWith(familyPrefix) || actionUuids.includes(uuid)) continue;
+		const where = uuid.startsWith(`${pluginUuid}.`) ? "" : ` (outside the plugin namespace ${pluginUuid}; a typo?)`;
+		fail(`action UUID mismatch: ${file} has ${uuid}${where}, which assets/manifest.json does not declare`);
 	}
 }
 
