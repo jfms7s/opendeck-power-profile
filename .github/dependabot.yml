@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      # Minor and patch bumps travel together; a semver-major bump gets its
+      # own PR so it can't hold routine updates back or hide behind them.
+      # Dependabot classifies by the literal version position, so a 0.x bump
+      # (e.g. 0.22 -> 0.23) still counts as minor and stays in the group.
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  # Bumps the SHA-pinned actions (and their `# vX.Y.Z` comments).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
