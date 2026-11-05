@@ -14,7 +14,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: jfms7s/opendeck-plugin-ci/.github/workflows/release.yml@098bfd0f9d891c2db4f26cd95627e6e6a567563a # v0.1.0
+    uses: jfms7s/opendeck-plugin-ci/.github/workflows/release.yml@b9bf0819298f7b391f25e7dec1a959f8390e7ae0 # v0.1.1
     with:
       apt-packages: "dbus-daemon"
       audit: "cargo-deny"

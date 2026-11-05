@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
       packages: read # the report-only eng-metrics-lab job
-    uses: jfms7s/opendeck-plugin-ci/.github/workflows/ci.yml@098bfd0f9d891c2db4f26cd95627e6e6a567563a # v0.1.0
+    uses: jfms7s/opendeck-plugin-ci/.github/workflows/ci.yml@b9bf0819298f7b391f25e7dec1a959f8390e7ae0 # v0.1.1
     with:
       # The jobs the ruleset requires: fails if an input above switches one off (skipped counts as green).
       required-jobs: "test bundle"
