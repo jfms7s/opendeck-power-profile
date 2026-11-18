@@ -3,7 +3,7 @@ name: CI
 # schedule and the advisory scan live here now). Scheduled runs only run `audit`.
 on:
   push:
-    branches: [master]
+    branches: [main, master]
   pull_request:
   schedule:
     - cron: "0 6 * * 1"
@@ -13,7 +13,7 @@ permissions: {}
 
 jobs:
   # Reports the checks as `ci / <job>`: those are the names for the
-  # "Protect master" ruleset (see opendeck-plugin-ci's README).
+  # "Protect main" ruleset (see opendeck-plugin-ci's README).
   ci:
     permissions:
       contents: read
