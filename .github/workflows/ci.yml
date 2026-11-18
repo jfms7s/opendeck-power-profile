@@ -3,7 +3,7 @@ name: CI
 # schedule and the advisory scan live here now). Scheduled runs only run `audit`.
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
   schedule:
     - cron: "0 6 * * 1"
